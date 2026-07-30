@@ -1,10 +1,10 @@
 use std::io::{Cursor, Read};
 
-use burn::backend::{NdArray, ndarray::NdArrayDevice};
+use burn::backend::{ndarray::NdArrayDevice, NdArray};
 use burn::module::Param;
 use burn::nn::{Linear, LinearConfig};
 use burn::tensor::{Tensor, TensorData};
-use burn_gdn2::{Gdn2Config, Gdn2Mode, GatedDeltaNet2};
+use burn_gdn2::{GatedDeltaNet2, Gdn2Config, Gdn2Mode};
 
 const EPSILON: f32 = 5e-4;
 
@@ -145,6 +145,7 @@ fn test_gdn2_1000_cases() {
         k_conv_w: Param::from_tensor(mk("k_conv_w")),
         v_conv_w: Param::from_tensor(mk("v_conv_w")),
         config: cfg,
+        decay_factors: None,
     };
 
     let mut global_max_diff = 0.0f32;
@@ -193,10 +194,11 @@ fn test_gdn2_1000_cases() {
         }
     }
 
-    println!(
-        "1000 cases: max_diff = {global_max_diff:.2e},  failures = {n_fail}/{n_cases}"
+    println!("1000 cases: max_diff = {global_max_diff:.2e},  failures = {n_fail}/{n_cases}");
+    assert!(
+        n_fail == 0,
+        "{n_fail}/{n_cases} cases exceeded EPSILON={EPSILON:.0e}"
     );
-    assert!(n_fail == 0, "{n_fail}/{n_cases} cases exceeded EPSILON={EPSILON:.0e}");
     assert!(
         global_max_diff < EPSILON,
         "max_diff={global_max_diff:.2e} >= EPSILON={EPSILON:.0e}"
@@ -209,13 +211,11 @@ struct BenchCfg {
     hk: usize,
 }
 
-const BENCH_MODELS: &[BenchCfg] = &[
-    BenchCfg {
-        d: 256,
-        h: 4,
-        hk: 64,
-    },
-];
+const BENCH_MODELS: &[BenchCfg] = &[BenchCfg {
+    d: 256,
+    h: 4,
+    hk: 64,
+}];
 
 fn bench_model<B: burn::tensor::backend::Backend>(
     label: &str,
@@ -251,9 +251,7 @@ fn bench_model<B: burn::tensor::backend::Backend>(
 
                 for _ in 0..3 {
                     let _ = match mode {
-                        Gdn2Mode::FusedRecurrent => {
-                            module.forward(input.clone(), &mut state, true)
-                        }
+                        Gdn2Mode::FusedRecurrent => module.forward(input.clone(), &mut state, true),
                         Gdn2Mode::Chunk => module.forward_train(input.clone()),
                     };
                 }
@@ -261,9 +259,7 @@ fn bench_model<B: burn::tensor::backend::Backend>(
                 let start = std::time::Instant::now();
                 for _ in 0..n_iters {
                     let _ = match mode {
-                        Gdn2Mode::FusedRecurrent => {
-                            module.forward(input.clone(), &mut state, true)
-                        }
+                        Gdn2Mode::FusedRecurrent => module.forward(input.clone(), &mut state, true),
                         Gdn2Mode::Chunk => module.forward_train(input.clone()),
                     };
                 }

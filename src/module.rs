@@ -43,6 +43,7 @@ pub struct GatedDeltaNet2<B: Backend> {
     pub k_conv_w: Param<Tensor<B, 2>>,
     pub v_conv_w: Param<Tensor<B, 2>>,
     pub config: Gdn2Config,
+    pub decay_factors: Option<Param<Tensor<B, 2>>>,
 }
 
 impl<B: Backend> GatedDeltaNet2<B> {
@@ -106,6 +107,9 @@ impl<B: Backend> GatedDeltaNet2<B> {
             q_conv_w: rand_w(kd),
             k_conv_w: rand_w(kd),
             v_conv_w: rand_w(vd),
+            decay_factors: cfg
+                .min_decay
+                .map(|_| Param::from_tensor(Tensor::ones([h, hk], device).mul_scalar(2.0))),
             config: cfg.clone(),
         }
     }
@@ -152,16 +156,23 @@ impl<B: Backend> GatedDeltaNet2<B> {
 
         let (output, new_state): (Tensor<B, 4>, Option<Tensor<B, 4>>) = if update_state {
             let (o, s) = fused_recurrent_gdn2(
-                projected.q, projected.k, projected.v,
-                projected.g, projected.b, projected.w,
-                state.take(), scale, true,
+                projected.q,
+                projected.k,
+                projected.v,
+                projected.g,
+                projected.b,
+                projected.w,
+                state.take(),
+                scale,
+                true,
             );
             (o, s)
         } else {
-            let mem = state.clone().unwrap_or_else(|| {
-                Tensor::zeros([batch, hv, hk, vd / hv], &projected.q.device())
-            });
-            let out = projected.q
+            let mem = state
+                .clone()
+                .unwrap_or_else(|| Tensor::zeros([batch, hv, hk, vd / hv], &projected.q.device()));
+            let out = projected
+                .q
                 .matmul(mem.clone())
                 .mul_scalar(scale)
                 .permute([0, 2, 1, 3]);
@@ -170,8 +181,11 @@ impl<B: Backend> GatedDeltaNet2<B> {
         *state = new_state;
 
         let out_4d = output.permute([0, 2, 1, 3]);
-        let out_norm = rms_norm_gate_per_head(out_4d, projected.gate, projected.o_norm, projected.eps);
-        projected.o_proj.forward(out_norm.reshape([batch, tokens, vd]))
+        let out_norm =
+            rms_norm_gate_per_head(out_4d, projected.gate, projected.o_norm, projected.eps);
+        projected
+            .o_proj
+            .forward(out_norm.reshape([batch, tokens, vd]))
     }
 
     /// Training forward: full-sequence forward, selects mode based on config.
@@ -196,25 +210,40 @@ impl<B: Backend> GatedDeltaNet2<B> {
         let output = match self.config.mode {
             Gdn2Mode::FusedRecurrent => {
                 let (o, _s) = fused_recurrent_gdn2(
-                    projected.q, projected.k, projected.v,
-                    projected.g, projected.b, projected.w,
-                    Some(state), scale, true,
+                    projected.q,
+                    projected.k,
+                    projected.v,
+                    projected.g,
+                    projected.b,
+                    projected.w,
+                    Some(state),
+                    scale,
+                    true,
                 );
                 o
             }
             Gdn2Mode::Chunk => {
                 let (o, _s) = chunk_wy_forward(
-                    projected.q, projected.k, projected.v,
-                    projected.g, projected.b, projected.w,
-                    state, scale, self.config.chunk_size,
+                    projected.q,
+                    projected.k,
+                    projected.v,
+                    projected.g,
+                    projected.b,
+                    projected.w,
+                    state,
+                    scale,
+                    self.config.chunk_size,
                 );
                 o
             }
         };
 
         let out_4d = output.permute([0, 2, 1, 3]);
-        let out_norm = rms_norm_gate_per_head(out_4d, projected.gate, projected.o_norm, projected.eps);
-        projected.o_proj.forward(out_norm.reshape([batch, tokens, vd]))
+        let out_norm =
+            rms_norm_gate_per_head(out_4d, projected.gate, projected.o_norm, projected.eps);
+        projected
+            .o_proj
+            .forward(out_norm.reshape([batch, tokens, vd]))
     }
 
     /// Shared projection pipeline: input → Q/K/V/B/W + gates.
@@ -265,6 +294,18 @@ impl<B: Backend> GatedDeltaNet2<B> {
             .reshape([1, 1, kd]);
         let g_pre = softplus(f_out + dt_b, 1.0);
         let g = -a_exp * g_pre;
+
+        let g = if let (Some(df), Some(min_d)) = (&self.decay_factors, self.config.min_decay) {
+            let alpha = (1.0 - min_d) as f32;
+            let factor = sigmoid(df.val())
+                .mul_scalar(alpha)
+                .reshape([1, h, hk])
+                .reshape([1, 1, kd]);
+            let d_lower_bounded = factor.mul(g.exp()).add_scalar(min_d as f32);
+            d_lower_bounded.log()
+        } else {
+            g
+        };
 
         let b_gate = sigmoid(self.b_proj.forward(hidden_states.clone()));
         let w_gate = sigmoid(self.w_proj.forward(hidden_states.clone()));
@@ -329,7 +370,12 @@ pub fn rms_norm_gate_per_head<B: Backend>(
     eps: f64,
 ) -> Tensor<B, 4> {
     let v = x.shape().dims::<4>()[3];
-    let rms = x.clone().powf_scalar(2.0).mean_dim(3).add_scalar(eps).sqrt();
+    let rms = x
+        .clone()
+        .powf_scalar(2.0)
+        .mean_dim(3)
+        .add_scalar(eps)
+        .sqrt();
     let normed = x / rms;
     let w = weight.reshape([1, 1, 1, v]);
     normed * w * silu(gate)

@@ -35,5 +35,5 @@ pub use config::{Gdn2Config, Gdn2Mode};
 pub use forward::{chunk_wy_forward, verify_chunk_vs_reference};
 pub use kernel::fused_recurrent::fused_recurrent_forward;
 pub use l2norm::l2_normalize;
-pub use module::{GatedDeltaNet2, ProjectedInputs, rms_norm_gate_per_head};
+pub use module::{rms_norm_gate_per_head, GatedDeltaNet2, ProjectedInputs};
 pub use short_conv::short_conv_1d;

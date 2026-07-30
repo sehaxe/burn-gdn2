@@ -18,7 +18,7 @@ pub enum Gdn2Mode {
 ///   - `b` (erase gate, `[0,1]^{d_k}`) — how much of each key channel to erase
 ///   - `w` (write gate, `[0,1]^{d_v}`) — how much of each value channel to write
 ///
-/// Setting `b_t = β·1` and `w_t = β·1` recovers KDA.
+/// Setting `b_t = β·1` and `w_t = β·1` recovers scalar-gated delta rule.
 /// Further collapsing the per-channel decay to a scalar recovers Gated DeltaNet.
 #[derive(Debug, Clone)]
 pub struct Gdn2Config {
@@ -46,6 +46,12 @@ pub struct Gdn2Config {
     pub mode: Gdn2Mode,
     /// Chunk size for `Chunk` mode. Default: 64 (matching reference).
     pub chunk_size: usize,
+    /// Lower bound on per-channel decay.
+    /// `None` (default) = standard GDN2 with unbounded decay (0..1).
+    /// `Some(0.9)` = guaranteed minimum decay per channel. Adds learned
+    /// per-channel factors: `min_decay + (1-min_decay)·sigmoid(w)`.
+    /// Improves long-range memory at the cost of slightly less adaptivity.
+    pub min_decay: Option<f64>,
 }
 
 impl Default for Gdn2Config {
@@ -61,6 +67,7 @@ impl Default for Gdn2Config {
             norm_eps: 1e-5,
             mode: Gdn2Mode::FusedRecurrent,
             chunk_size: 64,
+            min_decay: None,
         }
     }
 }

@@ -1,4 +1,4 @@
-# burn-gdn2 — Gated DeltaNet 2
+# burn-gdn2 - Gated DeltaNet 2
 
 [![Crates.io](https://img.shields.io/crates/v/burn-gdn2)](https://crates.io/crates/burn-gdn2)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
@@ -10,7 +10,7 @@ Channel-wise erase and write gates replace the scalar write-strength gate of
 the gated delta rule. Two forward modes: token-by-token recurrent (inference)
 and chunked WY decomposition (training).
 
-O(T) complexity instead of O(T²) — trains on 4K+ sequences on a single GPU.
+O(T) complexity instead of O(T²) - trains on 4K+ sequences on a single GPU.
 
 ## Requirements
 
@@ -46,11 +46,11 @@ let cfg = Gdn2Config {
 };
 let model = GatedDeltaNet2::<NdArray>::new(&cfg, &device);
 
-// Training — chunked WY forward
+// Training - chunked WY forward
 let x = Tensor::random([1, 1024, 256], Distribution::Normal(0.0, 1.0), &device);
 let output = model.forward_train(x);
 
-// Inference — token-by-token with persistent state
+// Inference - token-by-token with persistent state
 let mut state = None;
 let token = Tensor::random([1, 1, 256], Distribution::Normal(0.0, 1.0), &device);
 let output = model.forward(token, &mut state, true);
@@ -80,7 +80,7 @@ o_t = q_t^T S
 ```
 
 Where `b_t` is the channel-wise erase gate (key axis) and `w_t` is the
-channel-wise write gate (value axis), replacing the scalar gate of KDA.
+channel-wise write gate (value axis), replacing the scalar gate of the gated delta rule.
 
 ## Configuration
 
@@ -101,11 +101,11 @@ channel-wise write gate (value axis), replacing the scalar gate of KDA.
 
 Benchmarked on RTX 5060 Ti, Burn 0.21 vs equivalent PyTorch chunk implementation.
 
-**Chunk forward** (training mode) is **2.2–5.5× faster** across all configs —
+**Chunk forward** (training mode) is **2.2–5.5× faster** across all configs -
 batched matmul for cumulative sum and pre-allocated slice_assign replace
 O(T) CPU-side loops.
 
-**Projections only** (Q/K/V/B/W/G) are 0.6–0.8× vs PyTorch — Burn's cubecl
+**Projections only** (Q/K/V/B/W/G) are 0.6–0.8× vs PyTorch - Burn's cubecl
 matmul overhead for small matrix sizes. This is a fixed cost per layer and
 does not scale with sequence length.
 
