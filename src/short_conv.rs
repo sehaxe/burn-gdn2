@@ -2,10 +2,6 @@ use burn::tensor::activation::silu;
 use burn::tensor::{backend::Backend, Tensor};
 
 /// 1D causal depthwise convolution with kernel_size=4.
-///
-/// Pads the start of the sequence with 3 copies of the first token (causal
-/// padding), then applies the learned weight of shape `[channels, 4]` as a
-/// depthwise filter over the time dimension.
 pub fn short_conv_1d<B: Backend>(x: Tensor<B, 3>, weight: Tensor<B, 2>) -> Tensor<B, 3> {
     let [b, t, c] = x.shape().dims();
     let first = x.clone().slice([0..b, 0..1, 0..c]);
