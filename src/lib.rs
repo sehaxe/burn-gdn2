@@ -23,7 +23,6 @@
 //!
 //! - **`std`** (default) — standard library support
 //! - **`autodiff`** — differentiation support (required for training)
-//! - **`cubecl`** — CubeCL‑accelerated GPU kernels (experimental)
 
 pub mod config;
 pub mod forward;
