@@ -1,6 +1,6 @@
 [package]
 name = "burn-gdn2"
-version = "0.1.9"
+version = "0.2.0"
 edition = "2021"
 license = "AGPL-3.0"
 description = "Gated DeltaNet 2 — linear recurrent token mixer with channel-wise erase/write gates"
