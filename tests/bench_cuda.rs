@@ -1,16 +1,24 @@
-#![allow(missing_docs, non_snake_case)]
+#![allow(missing_docs, non_snake_case, dead_code, unused_imports, unused_variables)]
 //! burn-gdn2 CUDA benchmark — projections + chunk forward.
 //! Run: cargo test --release --features cuda -p burn-gdn2 --test bench_cuda -- --ignored --nocapture
 
+#[cfg(feature = "cuda")]
 use std::time::Instant;
+#[cfg(feature = "cuda")]
 use burn::tensor::{Distribution, Tensor};
+#[cfg(feature = "cuda")]
 use burn_cuda::Cuda;
+#[cfg(feature = "cuda")]
 use burn::module::Module;
+#[cfg(feature = "cuda")]
 use burn_gdn2::{Gdn2Config, Gdn2Mode, GatedDeltaNet2};
+#[cfg(feature = "cuda")]
 use burn_gdn2::forward::chunk_wy_forward;
 
+#[cfg(feature = "cuda")]
 type B = Cuda;
 
+#[cfg(feature = "cuda")]
 fn time_it(runs: usize, mut f: impl FnMut()) -> f64 {
     for _ in 0..(runs.min(5)) { f(); }
     let start = Instant::now();
@@ -18,6 +26,7 @@ fn time_it(runs: usize, mut f: impl FnMut()) -> f64 {
     start.elapsed().as_secs_f64() / runs as f64
 }
 
+#[cfg(feature = "cuda")]
 fn cfg(hs: usize, nh: usize, hk: usize, ev: f32, nvh: Option<usize>, cs: usize) -> Gdn2Config {
     Gdn2Config {
         hidden_size: hs, num_heads: nh, head_dim: hk, expand_v: ev,
@@ -26,6 +35,7 @@ fn cfg(hs: usize, nh: usize, hk: usize, ev: f32, nvh: Option<usize>, cs: usize) 
     }
 }
 
+#[cfg(feature = "cuda")]
 const CFGS: &[(&str, usize, usize, usize, f32, Option<usize>, usize, usize, usize, usize)] = &[
     ("tiny",    64,  2, 32, 1.0, None,      64, 1,   1,  64),
     ("small",  128,  4, 32, 1.0, None,      64, 1,   1, 256),
