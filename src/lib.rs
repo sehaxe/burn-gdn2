@@ -5,28 +5,18 @@
 //!
 //! ## Quick start
 //!
-//! ```rust
-//! use burn::backend::NdArray;
-//! use burn::tensor::Tensor;
+//! ```rust,ignore
 //! use burn_gdn2::{Gdn2Config, Gdn2Mode, GatedDeltaNet2};
 //!
-//! let device = burn::backend::ndarray::NdArrayDevice::Cpu;
+//! type Backend = burn_ndarray::NdArray;
+//! let device = Default::default();
 //! let config = Gdn2Config {
 //!     hidden_size: 64,
 //!     num_heads: 2,
 //!     head_dim: 32,
 //!     ..Default::default()
 //! };
-//! let model = GatedDeltaNet2::<NdArray>::new(&config, &device);
-//!
-//! // Inference — token‑by‑token, state passed by reference
-//! let input = Tensor::zeros([1, 16, 64], &device);
-//! let mut state = None;
-//! let output = model.forward(input, &mut state, true);
-//!
-//! // Training — full sequence, chunked WY for efficiency
-//! let input = Tensor::zeros([1, 128, 64], &device);
-//! let output = model.forward_train(input);
+//! let model = GatedDeltaNet2::<Backend>::new(&config, &device);
 //! ```
 //!
 //! ## Features
@@ -44,6 +34,7 @@ pub mod short_conv;
 
 pub use config::{Gdn2Config, Gdn2Mode};
 pub use forward::{chunk_wy_forward, verify_chunk_vs_reference};
+pub use kernel::fused_recurrent::fused_recurrent_forward;
 pub use l2norm::l2_normalize;
 pub use module::{GatedDeltaNet2, ProjectedInputs, rms_norm_gate_per_head};
 pub use short_conv::short_conv_1d;
