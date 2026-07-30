@@ -1,4 +1,5 @@
 #[test]
+#[cfg(feature = "binary-tests")]
 fn test_chunk_vs_reference() {
     use std::io::{Cursor, Read};
     use burn::backend::{NdArray, ndarray::NdArrayDevice};

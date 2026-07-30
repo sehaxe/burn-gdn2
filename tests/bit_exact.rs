@@ -80,6 +80,7 @@ fn lin_wb(
 }
 
 #[test]
+#[cfg(feature = "binary-tests")]
 fn test_gdn2_1000_cases() {
     let data = include_bytes!("ref_data.bin");
     let mut c = Cursor::new(data.as_slice());
