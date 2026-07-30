@@ -1,6 +1,5 @@
 use burn::tensor::{backend::Backend, Tensor};
 
-/// Lower triangular matrix for cumulative sum via batched matmul.
 fn tril_matrix<B: Backend>(t: usize, device: &B::Device) -> Tensor<B, 4> {
     let n = t * t;
     let mut d = vec![0.0f32; n];
@@ -8,7 +7,6 @@ fn tril_matrix<B: Backend>(t: usize, device: &B::Device) -> Tensor<B, 4> {
     Tensor::<B, 1>::from_floats(d.as_slice(), device).reshape([t, t]).unsqueeze_dims(&[0, 0])
 }
 
-/// Causal and strict masks for chunk_size.
 fn chunk_masks<B: Backend>(c: usize, device: &B::Device) -> (Tensor<B, 4>, Tensor<B, 4>) {
     let n = c * c;
     let mut causal = vec![0.0f32; n];
@@ -27,8 +25,6 @@ pub fn chunk_wy_forward<B: Backend>(
     let v_dim = v.shape().dims::<4>()[3];
     let device = q.device();
     let mut outputs = Vec::with_capacity(time.div_ceil(chunk_size));
-
-    // Pre-compute tril and masks — reused across chunks of same size
     let tril_full = tril_matrix(chunk_size, &device);
     let masks_full = chunk_masks(chunk_size, &device);
 
@@ -51,16 +47,17 @@ pub fn chunk_wy_forward<B: Backend>(
         };
 
         let g_cumsum = g_c.clone().swap_dims(2, 3).matmul(tril).swap_dims(2, 3);
-
         let gi = g_cumsum.clone().unsqueeze_dim::<5>(3);
         let gj = g_cumsum.clone().unsqueeze_dim::<5>(2);
         let decay = (gi - gj).exp().mean_dim(4).reshape([batch, heads, c, c]);
 
-        let qk = q_c.clone().matmul(k_c.clone().swap_dims(2, 3));
+        // Pre-compute k_c transposed — used twice
+        let k_c_t = k_c.clone().swap_dims(2, 3);
+        let qk = q_c.clone().matmul(k_c_t.clone());
         let aqk = qk * decay.clone() * scale * causal_mask;
 
         let bk = b_c.clone() * k_c.clone();
-        let akk = bk.matmul(k_c.clone().swap_dims(2, 3)) * decay * strict_mask;
+        let akk = bk.matmul(k_c_t) * decay * strict_mask;
 
         let g_cumsum_for_decay = g_cumsum.clone();
         let g_exp = g_cumsum.exp();
