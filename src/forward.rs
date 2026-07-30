@@ -1,26 +1,23 @@
 use burn::tensor::{backend::Backend, Tensor};
 
-/// Cumulative sum along dim 2 via batched matmul with lower triangular matrix.
-fn cumsum_seq_batched<B: Backend>(x: &Tensor<B, 4>, device: &B::Device, t: usize) -> Tensor<B, 4> {
+/// Lower triangular matrix for cumulative sum via batched matmul.
+fn tril_matrix<B: Backend>(t: usize, device: &B::Device) -> Tensor<B, 4> {
     let n = t * t;
-    let mut data = vec![0.0f32; n];
-    for i in 0..t { for j in 0..=i { data[i * t + j] = 1.0; } }
-    let tril = Tensor::<B, 1>::from_floats(data.as_slice(), device)
-        .reshape([t, t])
-        .unsqueeze_dims(&[0, 0]);
-    x.clone().swap_dims(2, 3).matmul(tril).swap_dims(2, 3)
+    let mut d = vec![0.0f32; n];
+    for i in 0..t { for j in 0..=i { d[i * t + j] = 1.0; } }
+    Tensor::<B, 1>::from_floats(d.as_slice(), device).reshape([t, t]).unsqueeze_dims(&[0, 0])
 }
 
-fn build_masks<B: Backend>(c: usize, device: &B::Device) -> (Tensor<B, 4>, Tensor<B, 4>) {
+/// Causal and strict masks for chunk_size.
+fn chunk_masks<B: Backend>(c: usize, device: &B::Device) -> (Tensor<B, 4>, Tensor<B, 4>) {
     let n = c * c;
     let mut causal = vec![0.0f32; n];
     let mut strict = vec![0.0f32; n];
-    for i in 0..c { for j in 0..=i { causal[i * c + j] = 1.0; if j < i { strict[i * c + j] = 1.0; } } }
-    (Tensor::<B, 1>::from_floats(causal.as_slice(), device).reshape([1, 1, c, c]),
-     Tensor::<B, 1>::from_floats(strict.as_slice(), device).reshape([1, 1, c, c]))
+    for i in 0..c { for j in 0..=i { causal[i*c+j] = 1.0; if j < i { strict[i*c+j] = 1.0; } } }
+    (Tensor::<B,1>::from_floats(causal.as_slice(),device).reshape([1,1,c,c]),
+     Tensor::<B,1>::from_floats(strict.as_slice(),device).reshape([1,1,c,c]))
 }
 
-/// Chunkwise WY forward — optimized with batched cumsum and slice_assign.
 pub fn chunk_wy_forward<B: Backend>(
     q: Tensor<B, 4>, k: Tensor<B, 4>, v: Tensor<B, 4>,
     g: Tensor<B, 4>, b: Tensor<B, 4>, w_gate: Tensor<B, 4>,
@@ -30,6 +27,10 @@ pub fn chunk_wy_forward<B: Backend>(
     let v_dim = v.shape().dims::<4>()[3];
     let device = q.device();
     let mut outputs = Vec::with_capacity(time.div_ceil(chunk_size));
+
+    // Pre-compute tril and masks — reused across chunks of same size
+    let tril_full = tril_matrix(chunk_size, &device);
+    let masks_full = chunk_masks(chunk_size, &device);
 
     for chunk_start in (0..time).step_by(chunk_size) {
         let chunk_end = (chunk_start + chunk_size).min(time);
@@ -43,13 +44,17 @@ pub fn chunk_wy_forward<B: Backend>(
         let b_c = b.clone().slice([0..batch, 0..heads, chunk_start..chunk_end]);
         let w_c = w_gate.clone().slice([0..batch, 0..heads, chunk_start..chunk_end]);
 
-        let g_cumsum = if c > 1 { cumsum_seq_batched(&g_c, &device, c) } else { g_c.clone() };
+        let (tril, (causal_mask, strict_mask)) = if c == chunk_size {
+            (tril_full.clone(), (masks_full.0.clone(), masks_full.1.clone()))
+        } else {
+            (tril_matrix(c, &device), chunk_masks(c, &device))
+        };
+
+        let g_cumsum = g_c.clone().swap_dims(2, 3).matmul(tril).swap_dims(2, 3);
 
         let gi = g_cumsum.clone().unsqueeze_dim::<5>(3);
         let gj = g_cumsum.clone().unsqueeze_dim::<5>(2);
         let decay = (gi - gj).exp().mean_dim(4).reshape([batch, heads, c, c]);
-
-        let (causal_mask, strict_mask) = build_masks(c, &device);
 
         let qk = q_c.clone().matmul(k_c.clone().swap_dims(2, 3));
         let aqk = qk * decay.clone() * scale * causal_mask;
@@ -69,13 +74,11 @@ pub fn chunk_wy_forward<B: Backend>(
             let akk_row = akk.clone().slice([0..batch, 0..heads, i..i + 1, 0..i]);
             let w_prev = w_wy.clone().slice([0..batch, 0..heads, 0..i, 0..k_dim]);
             let u_prev = u.clone().slice([0..batch, 0..heads, 0..i, 0..v_dim]);
-
             let w_row = rhs_k.clone().slice([0..batch, 0..heads, i..i + 1, 0..k_dim]);
             let u_row = rhs_v.clone().slice([0..batch, 0..heads, i..i + 1, 0..v_dim]);
 
             w_wy = w_wy.slice_assign([0..batch, 0..heads, i..i + 1, 0..k_dim],
                 if i == 0 { w_row } else { w_row - akk_row.clone().matmul(w_prev) });
-
             u = u.slice_assign([0..batch, 0..heads, i..i + 1, 0..v_dim],
                 if i == 0 { u_row } else { u_row - akk_row.matmul(u_prev) });
         }
@@ -88,8 +91,8 @@ pub fn chunk_wy_forward<B: Backend>(
         outputs.push(intra + inter);
 
         let g_last = g_exp.clone().slice([0..batch, 0..heads, c - 1..c]);
-        let decay_last = (g_cumsum_for_decay.clone()
-            .slice([0..batch, 0..heads, c - 1..c]) - g_cumsum_for_decay).exp();
+        let g_last_cumsum = g_cumsum_for_decay.clone().slice([0..batch, 0..heads, c - 1..c]);
+        let decay_last = (g_last_cumsum - g_cumsum_for_decay).exp();
         state = state * g_last.swap_dims(2, 3) + (k_c * decay_last).swap_dims(2, 3).matmul(v_new);
     }
 
@@ -113,7 +116,6 @@ pub fn verify_chunk_vs_reference<B: Backend>(
         q, k, v, g, b, w_gate, state, scale,
     );
     (chunk_out - ref_out).abs().max().into_data().bytes
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+        .chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap()))
         .fold(0.0f32, f32::max)
 }
