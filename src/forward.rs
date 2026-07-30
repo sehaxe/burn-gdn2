@@ -16,6 +16,7 @@ fn chunk_masks<B: Backend>(c: usize, device: &B::Device) -> (Tensor<B, 4>, Tenso
      Tensor::<B,1>::from_floats(strict.as_slice(),device).reshape([1,1,c,c]))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn chunk_wy_forward<B: Backend>(
     q: Tensor<B, 4>, k: Tensor<B, 4>, v: Tensor<B, 4>,
     g: Tensor<B, 4>, b: Tensor<B, 4>, w_gate: Tensor<B, 4>,
@@ -96,6 +97,7 @@ pub fn chunk_wy_forward<B: Backend>(
     (Tensor::cat(outputs, 2), state)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn verify_chunk_vs_reference<B: Backend>(
     q: Tensor<B, 4>, k: Tensor<B, 4>, v: Tensor<B, 4>,
     g: Tensor<B, 4>, b: Tensor<B, 4>, w_gate: Tensor<B, 4>,

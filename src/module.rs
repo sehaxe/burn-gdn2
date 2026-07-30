@@ -86,8 +86,7 @@ impl<B: Backend> GatedDeltaNet2<B> {
             )
             .exp()
             .clamp(1e-4, f32::MAX);
-            let dt_bias = raw.clone() + (-raw.clone()).exp().neg().add_scalar(1.0).log();
-            dt_bias
+            raw.clone() + (-raw.clone()).exp().neg().add_scalar(1.0).log()
         };
 
         Self {

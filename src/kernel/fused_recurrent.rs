@@ -7,6 +7,7 @@ use burn::tensor::{backend::Backend, Tensor};
 ///   v_new ← w_t * v_t - (b_t * k_t)^T @ S       — erase + write
 ///   S ← S + k_t @ v_new^T                        — rank-1 state update
 ///   o_t ← q_t^T @ S * scale                      — output read
+#[allow(clippy::too_many_arguments)]
 pub fn fused_recurrent_forward<B: Backend>(
     q: Tensor<B, 4>,
     k: Tensor<B, 4>,
@@ -57,6 +58,7 @@ pub fn fused_recurrent_forward<B: Backend>(
 ///
 /// When `update_state` is true, the state is modified in-place (normal
 /// autoregressive decoding). When false, the state is read-only (prefill).
+#[allow(clippy::too_many_arguments)]
 pub fn fused_recurrent_gdn2<B: Backend>(
     q: Tensor<B, 4>,
     k: Tensor<B, 4>,
