@@ -101,11 +101,11 @@ channel-wise write gate (value axis), replacing the scalar gate of the gated del
 
 Benchmarked on RTX 5060 Ti, Burn 0.21 vs equivalent PyTorch chunk implementation.
 
-**Chunk forward** (training mode) is **2.2–5.5× faster** across all configs -
+**Chunk forward** (training mode) is **2.2-5.5× faster** across all configs -
 batched matmul for cumulative sum and pre-allocated slice_assign replace
 O(T) CPU-side loops.
 
-**Projections only** (Q/K/V/B/W/G) are 0.6–0.8× vs PyTorch - Burn's cubecl
+**Projections only** (Q/K/V/B/W/G) are 0.6-0.8× vs PyTorch - Burn's cubecl
 matmul overhead for small matrix sizes. This is a fixed cost per layer and
 does not scale with sequence length.
 

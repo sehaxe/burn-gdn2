@@ -196,3 +196,61 @@ fn test_chunk_vs_reference() {
         "global max_diff too large: {global_max_diff:.2e}"
     );
 }
+
+#[test]
+#[cfg(feature = "binary-tests")]
+fn test_chunk_matches_fused_with_real_decay() {
+    use burn::backend::{ndarray::NdArrayDevice, NdArray};
+    use burn::tensor::{Distribution, Tensor};
+    use burn_gdn2::{chunk_wy_forward, fused_recurrent_forward};
+
+    let device = NdArrayDevice::Cpu;
+    let (b, h, t, k, vd, c) = (2usize, 3usize, 130usize, 16usize, 8usize, 64usize);
+
+    // Strong, non-uniform per-channel decay: log-decay in [-0.15, -0.01]
+    // (per-channel, per-position). The old channel-mean of exp(G_rj-G_sj)
+    // is ~30-90% wrong in this regime; the factorized (Q.Gamma)(K/Gamma)^T
+    // must match the fused recurrence to ~1e-4.
+    // Note: keys must be L2-normalized (as the module does) or the delta-rule
+    // operator (I - (b*k)k^T) is unstable for raw Gaussian keys.
+    let g =
+        Tensor::<NdArray, 4>::random([b, h, t, k], Distribution::Uniform(-0.15, -0.01), &device);
+    let q = Tensor::<NdArray, 4>::random([b, h, t, k], Distribution::Normal(0.0, 1.0), &device);
+    let kt_raw =
+        Tensor::<NdArray, 4>::random([b, h, t, k], Distribution::Normal(0.0, 1.0), &device);
+    let kt = kt_raw.clone() / kt_raw.powf_scalar(2.0).sum_dim(3).sqrt();
+    let v = Tensor::<NdArray, 4>::random([b, h, t, vd], Distribution::Normal(0.0, 1.0), &device);
+    let erase =
+        Tensor::<NdArray, 4>::random([b, h, t, k], Distribution::Uniform(0.0, 1.0), &device);
+    let write =
+        Tensor::<NdArray, 4>::random([b, h, t, vd], Distribution::Normal(0.0, 1.0), &device);
+    let state =
+        Tensor::<NdArray, 4>::random([b, h, k, vd], Distribution::Normal(0.0, 1.0), &device);
+
+    let (chunk_out, chunk_state) = chunk_wy_forward(
+        q.clone(),
+        kt.clone(),
+        v.clone(),
+        g.clone(),
+        erase.clone(),
+        write.clone(),
+        state.clone(),
+        0.125,
+        c,
+    );
+    let (fused_out, fused_state) = fused_recurrent_forward(q, kt, v, g, erase, write, state, 0.125);
+
+    let diff = (chunk_out - fused_out).abs().max().into_data();
+    let state_diff = (chunk_state - fused_state).abs().max().into_data();
+    let to_f32 = |d: burn::tensor::TensorData| {
+        d.bytes
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .fold(0.0f32, f32::max)
+    };
+    let d_out = to_f32(diff);
+    let d_state = to_f32(state_diff);
+    println!("chunk vs fused with real decay: out={d_out:.2e} state={d_state:.2e}");
+    assert!(d_out < 1e-4, "output mismatch {d_out:.2e}");
+    assert!(d_state < 1e-4, "state mismatch {d_state:.2e}");
+}

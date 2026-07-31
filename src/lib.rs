@@ -1,6 +1,6 @@
 //! # burn-gdn2
 //!
-//! Gated DeltaNet 2 (GDN-2) — a linear‑complexity recurrent token mixer
+//! Gated DeltaNet 2 (GDN-2) - a linear‑complexity recurrent token mixer
 //! with channel‑wise erase/write gates.
 //!
 //! ## Quick start
@@ -21,8 +21,8 @@
 //!
 //! ## Features
 //!
-//! - **`std`** (default) — standard library support
-//! - **`autodiff`** — differentiation support (required for training)
+//! - **`std`** (default) - standard library support
+//! - **`autodiff`** - differentiation support (required for training)
 
 pub mod config;
 pub mod forward;

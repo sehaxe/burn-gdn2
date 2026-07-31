@@ -15,8 +15,8 @@ pub enum Gdn2Mode {
 ///
 /// GDN-2 decouples the erase and write operations of the gated delta rule
 /// into two independent channel-wise gates:
-///   - `b` (erase gate, `[0,1]^{d_k}`) — how much of each key channel to erase
-///   - `w` (write gate, `[0,1]^{d_v}`) — how much of each value channel to write
+///   - `b` (erase gate, `[0,1]^{d_k}`) - how much of each key channel to erase
+///   - `w` (write gate, `[0,1]^{d_v}`) - how much of each value channel to write
 ///
 /// Setting `b_t = β·1` and `w_t = β·1` recovers scalar-gated delta rule.
 /// Further collapsing the per-channel decay to a scalar recovers Gated DeltaNet.

@@ -1,3 +1,5 @@
+//! Bit-exact reference tests for the Gated DeltaNet 2 paper implementation.
+#![allow(dead_code)]
 use std::io::{Cursor, Read};
 
 use burn::backend::{ndarray::NdArrayDevice, NdArray};

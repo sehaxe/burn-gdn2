@@ -1,12 +1,12 @@
 use burn::tensor::{backend::Backend, Tensor};
 
-/// Fused recurrent forward — token-by-token scan.
+/// Fused recurrent forward - token-by-token scan.
 ///
 /// Reference implementation. Each token applies:
-///   S ← S * exp(g_t)                             — channel-wise decay
-///   v_new ← w_t * v_t - (b_t * k_t)^T @ S       — erase + write
-///   S ← S + k_t @ v_new^T                        — rank-1 state update
-///   o_t ← q_t^T @ S * scale                      — output read
+///   S ← S * exp(g_t)                             - channel-wise decay
+///   v_new ← w_t * v_t - (b_t * k_t)^T @ S       - erase + write
+///   S ← S + k_t @ v_new^T                        - rank-1 state update
+///   o_t ← q_t^T @ S * scale                      - output read
 #[allow(clippy::too_many_arguments)]
 pub fn fused_recurrent_forward<B: Backend>(
     q: Tensor<B, 4>,
@@ -32,7 +32,7 @@ pub fn fused_recurrent_forward<B: Backend>(
         let b_t = b.clone().slice_dim(2, t..t + 1);
         let w_t = w.clone().slice_dim(2, t..t + 1);
 
-        // S ← S * exp(g_tᵀ) — decay state along K dimension
+        // S ← S * exp(g_tᵀ) - decay state along K dimension
         state = state * g_t.swap_dims(2, 3);
 
         // v_new = w * v - (b * k)^T @ S

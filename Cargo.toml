@@ -1,9 +1,9 @@
 [package]
 name = "burn-gdn2"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "AGPL-3.0"
-description = "Gated DeltaNet 2 — linear recurrent token mixer with channel-wise erase/write gates"
+description = "Gated DeltaNet 2 - linear recurrent token mixer with channel-wise erase/write gates"
 repository = "https://github.com/sehaxe/burn-gdn2"
 homepage = "https://github.com/sehaxe/burn-gdn2"
 keywords = ["burn", "gdn2", "linear-attention", "recurrent", "transformer"]

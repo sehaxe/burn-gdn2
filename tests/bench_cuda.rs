@@ -5,7 +5,7 @@
     unused_imports,
     unused_variables
 )]
-//! burn-gdn2 CUDA benchmark — projections + chunk forward.
+//! burn-gdn2 CUDA benchmark - projections + chunk forward.
 //! Run: cargo test --release --features cuda -p burn-gdn2 --test bench_cuda -- --ignored --nocapture
 
 #[cfg(feature = "cuda")]
@@ -79,7 +79,7 @@ const CFGS: &[(
 fn bench_cuda() {
     let dev = Default::default();
     println!("\n{:=^80}", "");
-    println!("  burn-gdn2 CUDA BENCHMARK — RTX 5060 Ti");
+    println!("  burn-gdn2 CUDA BENCHMARK - RTX 5060 Ti");
     println!("{:=^80}", "");
 
     println!("\n── 1. PROJECTIONS ONLY ──");

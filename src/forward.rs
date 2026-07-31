@@ -85,21 +85,25 @@ pub fn chunk_wy_forward<B: Backend>(
             (tril_matrix(c, &device), chunk_masks(c, &device))
         };
 
-        let g_cumsum = g_c.clone().swap_dims(2, 3).matmul(tril).swap_dims(2, 3);
-        let gi = g_cumsum.clone().unsqueeze_dim::<5>(3);
-        let gj = g_cumsum.clone().unsqueeze_dim::<5>(2);
-        let decay = (gi - gj).exp().mean_dim(4).reshape([batch, heads, c, c]);
-
-        // Pre-compute k_c transposed — used twice
-        let k_c_t = k_c.clone().swap_dims(2, 3);
-        let qk = q_c.clone().matmul(k_c_t.clone());
-        let aqk = qk * decay.clone() * scale * causal_mask;
+        // G[t] = sum_{j<=t} g[j] (cumulative from chunk start). tril[i,j]=1 for
+        // j<=i, so A.tril sums j>=t — must transpose to get the forward cumsum.
+        let g_cumsum = g_c
+            .clone()
+            .swap_dims(2, 3)
+            .matmul(tril.clone().transpose())
+            .swap_dims(2, 3);
+        let g_exp = g_cumsum.clone().exp();
+        // Per-channel decay inside the channel sum (paper Eq 25/43):
+        //   A_qk[r,s] = sum_j q_rj k_sj exp(G_rj - G_sj)
+        // factorized as (Q⊙Gamma)(K/Gamma)^T. A channel-mean of exp(G_rj-G_sj)
+        // is only exact for channel-uniform decay.
+        let k_over_gamma = k_c.clone() / g_exp.clone();
+        let qk = (q_c.clone() * g_exp.clone()).matmul(k_over_gamma.clone().swap_dims(2, 3));
+        let aqk = qk * scale * causal_mask;
 
         let bk = b_c.clone() * k_c.clone();
-        let akk = bk.matmul(k_c_t) * decay * strict_mask;
+        let akk = (bk * g_exp.clone()).matmul(k_over_gamma.swap_dims(2, 3)) * strict_mask;
 
-        let g_cumsum_for_decay = g_cumsum.clone();
-        let g_exp = g_cumsum.exp();
         let rhs_k = b_c * k_c.clone() * g_exp.clone();
         let rhs_v = w_c * v_c;
 
@@ -143,10 +147,8 @@ pub fn chunk_wy_forward<B: Backend>(
         outputs.push(intra + inter);
 
         let g_last = g_exp.clone().slice([0..batch, 0..heads, c - 1..c]);
-        let g_last_cumsum = g_cumsum_for_decay
-            .clone()
-            .slice([0..batch, 0..heads, c - 1..c]);
-        let decay_last = (g_last_cumsum - g_cumsum_for_decay).exp();
+        let g_last_cumsum = g_cumsum.clone().slice([0..batch, 0..heads, c - 1..c]);
+        let decay_last = (g_last_cumsum - g_cumsum).exp();
         state = state * g_last.swap_dims(2, 3) + (k_c * decay_last).swap_dims(2, 3).matmul(v_new);
     }
 

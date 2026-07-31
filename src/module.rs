@@ -14,8 +14,8 @@ use crate::short_conv::short_conv_1d;
 ///
 /// GDN-2 decouples the erase and write operations of the gated delta rule
 /// into two independent channel-wise gates:
-///   - `b` (erase gate, `[0,1]^{d_k}`) — how much of each key channel to erase
-///   - `w` (write gate, `[0,1]^{d_v}`) — how much of each value channel to write
+///   - `b` (erase gate, `[0,1]^{d_k}`) - how much of each key channel to erase
+///   - `w` (write gate, `[0,1]^{d_v}`) - how much of each value channel to write
 ///
 /// The per-token recurrence on the matrix state `S ∈ R^{d_k × d_v}` is:
 ///
