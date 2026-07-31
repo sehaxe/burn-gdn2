@@ -114,6 +114,7 @@ fn test_gdn2_1000_cases() {
         norm_eps: 1e-5,
         mode: Gdn2Mode::FusedRecurrent,
         chunk_size: 64,
+        min_decay: None,
     };
 
     let get = |name: &str| -> &[f32] {
@@ -235,6 +236,7 @@ fn bench_model<B: burn::tensor::backend::Backend>(
                 norm_eps: 1e-5,
                 mode,
                 chunk_size: 64,
+                min_decay: None,
             };
             let module = GatedDeltaNet2::<B>::new(&cfg, device);
 

@@ -13,6 +13,7 @@ default = ["std"]
 std = ["burn/std", "burn-tensor/std"]
 autodiff = ["burn/autodiff"]
 cuda = ["dep:burn-cuda"]
+binary-tests = []
 
 [dependencies]
 burn = { version = "0.21", default-features = false }

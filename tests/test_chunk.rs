@@ -122,6 +122,7 @@ fn test_chunk_vs_reference() {
             norm_eps: 1e-5,
             mode: Gdn2Mode::Chunk,
             chunk_size,
+            min_decay: None,
         };
         let module = GatedDeltaNet2 {
             q_proj: lin_w(mk("q_proj"), &device),
