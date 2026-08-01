@@ -30,9 +30,12 @@ pub struct Gdn2Config {
     pub head_dim: usize,
     /// Expansion factor for the value dimension.
     /// `head_v_dim = head_dim * expand_v`, `value_dim = num_v_heads * head_v_dim`.
+    /// Must produce an integer `head_v_dim` (checked at [`GatedDeltaNet2::new`]).
     pub expand_v: f32,
     /// Number of value heads. If `None`, equals `num_heads`.
-    /// GVA (Grouped Value Attention) is applied when `num_v_heads > num_heads`.
+    /// GVA (Grouped Value Attention) is applied when `num_v_heads > num_heads`
+    /// and must then be divisible by `num_heads` (checked at
+    /// [`GatedDeltaNet2::new`]). `num_v_heads < num_heads` is not supported.
     pub num_v_heads: Option<usize>,
     /// Whether to apply a short-depthwise convolution before the recurrence.
     pub use_short_conv: bool,
@@ -52,6 +55,60 @@ pub struct Gdn2Config {
     /// per-channel factors: `min_decay + (1-min_decay)·sigmoid(w)`.
     /// Improves long-range memory at the cost of slightly less adaptivity.
     pub min_decay: Option<f64>,
+}
+
+impl Gdn2Config {
+    /// Validate the configuration. Panics with a descriptive message on
+    /// invalid combinations (mirrors the checks in the reference paper code).
+    ///
+    /// # Panics
+    ///
+    /// - `hidden_size`, `num_heads` or `head_dim` are zero.
+    /// - `head_dim * expand_v` is not an integer.
+    /// - `num_v_heads > num_heads` and not divisible by `num_heads`.
+    /// - `num_v_heads < num_heads` (unsupported, use GVA semantics).
+    /// - `chunk_size` is zero (would infinite-loop the chunk scan).
+    pub fn validate(&self) {
+        let h = self.num_heads;
+        let hk = self.head_dim;
+        assert!(
+            self.hidden_size > 0,
+            "hidden_size must be > 0, got {}",
+            self.hidden_size
+        );
+        assert!(h > 0, "num_heads must be > 0, got {}", h);
+        assert!(hk > 0, "head_dim must be > 0, got {}", hk);
+        assert!(
+            self.expand_v > 0.0 && (hk as f32 * self.expand_v).fract() == 0.0,
+            "expand_v={} must produce an integer head_v_dim when multiplied by \
+             head_dim={} (got {})",
+            self.expand_v,
+            hk,
+            hk as f32 * self.expand_v,
+        );
+        if let Some(hv) = self.num_v_heads {
+            assert!(hv > 0, "num_v_heads must be > 0, got {hv}");
+            assert!(
+                hv >= h,
+                "num_v_heads={hv} < num_heads={h} is not supported; \
+                 use num_v_heads >= num_heads (GVA repeats key-side heads)"
+            );
+            assert!(
+                hv % h == 0,
+                "num_v_heads={hv} must be divisible by num_heads={h}"
+            );
+        }
+        assert!(
+            self.chunk_size > 0,
+            "chunk_size must be > 0, got {}",
+            self.chunk_size
+        );
+        assert!(
+            self.norm_eps > 0.0,
+            "norm_eps must be > 0, got {}",
+            self.norm_eps
+        );
+    }
 }
 
 impl Default for Gdn2Config {

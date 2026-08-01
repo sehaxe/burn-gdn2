@@ -1,18 +1,20 @@
 [package]
 name = "burn-gdn2"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
+rust-version = "1.75"
 license = "AGPL-3.0"
 description = "Gated DeltaNet 2 - linear recurrent token mixer with channel-wise erase/write gates"
 repository = "https://github.com/sehaxe/burn-gdn2"
 homepage = "https://github.com/sehaxe/burn-gdn2"
 keywords = ["burn", "gdn2", "linear-attention", "recurrent", "transformer"]
+readme = "README.md"
 
 [features]
 default = ["std"]
 std = ["burn/std", "burn-tensor/std"]
 autodiff = ["burn/autodiff"]
-cuda = ["dep:burn-cuda"]
+cuda = ["dep:burn-cuda", "dep:burn-cubecl", "dep:cubecl"]
 binary-tests = []
 
 [dependencies]
@@ -20,10 +22,13 @@ burn = { version = "0.21", default-features = false }
 burn-nn = "0.21"
 burn-tensor = "0.21"
 burn-cuda = { version = "0.21", optional = true, default-features = false }
+burn-cubecl = { version = "0.21", optional = true, default-features = false }
+cubecl = { version = "0.10", optional = true, default-features = false, features = ["std"] }
 
 [dev-dependencies]
 burn-ndarray = { version = "0.21", features = ["blas-openblas"] }
 burn-cuda = { version = "0.21" }
+burn-autodiff = "0.21"
 burn = { version = "0.21", features = ["ndarray", "autodiff", "cuda"] }
 
 [package.metadata.docs.rs]

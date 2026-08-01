@@ -1,4 +1,4 @@
-use burn::module::{Module, Param};
+use burn::module::{Initializer, Module, Param};
 use burn::nn::{Linear, LinearConfig};
 use burn::tensor::{backend::Backend, Distribution as TensorDistribution, Tensor};
 
@@ -7,8 +7,64 @@ use burn::tensor::activation::{sigmoid, silu, softplus};
 use crate::config::{Gdn2Config, Gdn2Mode};
 use crate::forward::chunk_wy_forward;
 use crate::kernel::fused_recurrent::fused_recurrent_gdn2;
-use crate::l2norm::l2_normalize;
-use crate::short_conv::short_conv_1d;
+use crate::l2norm::l2_normalize_4d;
+use crate::short_conv::{short_conv_1d, SHORT_CONV_CACHE};
+
+/// Gain used for Xavier-uniform init of all linear layers, matching the
+/// reference implementation (`gain = 2^-2.5`).
+/// Decay to the reference: sequences of at most this length always use the
+/// fused-recurrent path at inference, longer ones fall back to `mode`.
+const FUSED_RECURRENT_MAX_SEQ: usize = 64;
+
+/// Recurrent + short-convolution state of a [`GatedDeltaNet2`] layer.
+///
+/// Carries everything needed to continue generation token by token after a
+/// prefill pass:
+/// - `recurrent`: the matrix state `S [B, HV, K, V]` of the delta rule,
+/// - `conv_q`/`conv_k`/`conv_v`: the last `SHORT_CONV_CACHE` projected values
+///   of each short convolution `[B, SHORT_CONV_CACHE, K/V]`.
+///
+/// The convolution cache matters: without it, decoding token `t` would pad the
+/// conv with the *current* token instead of the previous ones and drift from
+/// the prefill trajectory.
+#[derive(Debug, Clone)]
+pub struct Gdn2State<B: Backend> {
+    /// Recurrent matrix state `[B, HV, K, V]`.
+    pub recurrent: Tensor<B, 4>,
+    /// Short-conv context for q `[B, SHORT_CONV_CACHE, K]`.
+    pub conv_q: Tensor<B, 3>,
+    /// Short-conv context for k `[B, SHORT_CONV_CACHE, K]`.
+    pub conv_k: Tensor<B, 3>,
+    /// Short-conv context for v `[B, SHORT_CONV_CACHE, V]`.
+    pub conv_v: Tensor<B, 3>,
+}
+
+impl<B: Backend> Gdn2State<B> {
+    /// Create a zero-initialized state (used as a fresh prefill/decoding state).
+    ///
+    /// `recurrent` is per-head `[B, HV, head_dim, head_v_dim]`; the conv
+    /// caches carry the projected channel dims `[B, SHORT_CONV_CACHE, K/V]`.
+    pub fn zeros(
+        device: &B::Device,
+        batch: usize,
+        hv: usize,
+        hk: usize,
+        v_head: usize,
+        kd: usize,
+        vd: usize,
+    ) -> Self {
+        Self {
+            recurrent: Tensor::zeros([batch, hv, hk, v_head], device),
+            conv_q: Tensor::zeros([batch, SHORT_CONV_CACHE, kd], device),
+            conv_k: Tensor::zeros([batch, SHORT_CONV_CACHE, kd], device),
+            conv_v: Tensor::zeros([batch, SHORT_CONV_CACHE, vd], device),
+        }
+    }
+}
+
+/// Updated short-convolution context returned by [`GatedDeltaNet2::project`]:
+/// the last `SHORT_CONV_CACHE` projected values of q, k and v.
+pub type ConvCache<B> = (Tensor<B, 3>, Tensor<B, 3>, Tensor<B, 3>);
 
 /// GDN-2 (Gated DeltaNet 2) token-mixing layer.
 ///
@@ -48,7 +104,12 @@ pub struct GatedDeltaNet2<B: Backend> {
 
 impl<B: Backend> GatedDeltaNet2<B> {
     /// Create a new GDN-2 layer from a configuration.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the configuration is invalid, see [`Gdn2Config::validate`].
     pub fn new(cfg: &Gdn2Config, device: &B::Device) -> Self {
+        cfg.validate();
         let d = cfg.hidden_size;
         let h = cfg.num_heads;
         let hk = cfg.head_dim;
@@ -56,18 +117,32 @@ impl<B: Backend> GatedDeltaNet2<B> {
         let kd = h * hk;
         let v_head = (hk as f32 * cfg.expand_v) as usize;
         let vd = hv * v_head;
-        let gain = 2.0f64.powf(-2.5);
 
-        let lin = |i, o| LinearConfig::new(i, o).with_bias(false).init(device);
-        let lin_b = |i, o| LinearConfig::new(i, o).with_bias(true).init(device);
+        let xavier = || Initializer::XavierUniform {
+            gain: 2f64.powf(-2.5),
+        };
+        let lin = |i, o| {
+            LinearConfig::new(i, o)
+                .with_bias(false)
+                .with_initializer(xavier())
+                .init(device)
+        };
+        let lin_b = |i, o| {
+            let mut lin = LinearConfig::new(i, o)
+                .with_bias(true)
+                .with_initializer(xavier())
+                .init(device);
+            // Reference code zero-initializes all biases.
+            lin.bias = Some(Param::from_tensor(Tensor::zeros([o], device)));
+            lin
+        };
 
+        // Short-conv weights: U(-0.5, 0.5), matching the reference conv init
+        // (kaiming_uniform with a=sqrt(5), fan_in = kernel_size = 4).
         let rand_w = |c: usize| -> Param<Tensor<B, 2>> {
             let w = Tensor::<B, 2>::random(
                 [c, 4],
-                TensorDistribution::Uniform(
-                    -gain * (1.0f64 / c as f64).sqrt(),
-                    gain * (1.0f64 / c as f64).sqrt(),
-                ),
+                TensorDistribution::Uniform(-0.5f64, 0.5f64),
                 device,
             );
             Param::from_tensor(w)
@@ -133,9 +208,15 @@ impl<B: Backend> GatedDeltaNet2<B> {
 
     /// Inference forward: one sequence pass with state management.
     ///
-    /// When `update_state` is true, the recurrent state is updated (normal
-    /// autoregressive decoding). When false, the state is read without
-    /// modification (useful for prefill).
+    /// Short sequences (≤ 64 tokens) always use the token-by-token
+    /// `FusedRecurrent` path; longer ones use the configured `mode` (the
+    /// `Chunk` path is substantially faster for long sequences). When
+    /// `update_state` is true, the recurrent and short-convolution state is
+    /// updated (normal autoregressive decoding). When false, the state is read
+    /// without modification (useful for prefill).
+    ///
+    /// The conv cache in `state` is what makes token-by-token decoding
+    /// equivalent to a single forward pass over the full sequence.
     ///
     /// # Panics
     ///
@@ -143,42 +224,88 @@ impl<B: Backend> GatedDeltaNet2<B> {
     pub fn forward(
         &self,
         hidden_states: Tensor<B, 3>,
-        state: &mut Option<Tensor<B, 4>>,
+        state: &mut Option<Gdn2State<B>>,
         update_state: bool,
     ) -> Tensor<B, 3> {
         self.validate(&hidden_states);
         let [batch, tokens, _] = hidden_states.shape().dims::<3>();
-        let projected = self.project(hidden_states);
+
+        let conv_in = state.as_ref().map(|s| (&s.conv_q, &s.conv_k, &s.conv_v));
+        let (projected, conv_out) = self.project(hidden_states, conv_in);
+
         let hk = self.config.head_dim;
         let hv = projected.hv;
         let vd = projected.vd;
+        let kd = self.config.num_heads * hk;
+        let v_head = vd / hv;
         let scale = (hk as f64).powf(-0.5);
+        let device = projected.q.device();
 
-        let (output, new_state): (Tensor<B, 4>, Option<Tensor<B, 4>>) = if update_state {
-            let (o, s) = fused_recurrent_gdn2(
-                projected.q,
-                projected.k,
-                projected.v,
-                projected.g,
-                projected.b,
-                projected.w,
-                state.take(),
-                scale,
-                true,
-            );
-            (o, s)
+        let output = if update_state {
+            let mode = if tokens <= FUSED_RECURRENT_MAX_SEQ {
+                Gdn2Mode::FusedRecurrent
+            } else {
+                self.config.mode
+            };
+            let (o, new_rec) = match mode {
+                Gdn2Mode::FusedRecurrent => {
+                    let rec = state
+                        .as_ref()
+                        .map(|s| s.recurrent.clone())
+                        .unwrap_or_else(|| Tensor::zeros([batch, hv, hk, v_head], &device));
+                    let (o, ns) = fused_recurrent_gdn2(
+                        projected.q,
+                        projected.k,
+                        projected.v,
+                        projected.g,
+                        projected.b,
+                        projected.w,
+                        Some(rec),
+                        scale,
+                        true,
+                    );
+                    (o, ns.expect("fused path always returns a state"))
+                }
+                Gdn2Mode::Chunk => {
+                    let rec = state
+                        .as_ref()
+                        .map(|s| s.recurrent.clone())
+                        .unwrap_or_else(|| Tensor::zeros([batch, hv, hk, v_head], &device));
+                    chunk_wy_forward(
+                        projected.q,
+                        projected.k,
+                        projected.v,
+                        projected.g,
+                        projected.b,
+                        projected.w,
+                        rec,
+                        scale,
+                        self.config.chunk_size,
+                    )
+                }
+            };
+
+            let st = state
+                .get_or_insert_with(|| Gdn2State::zeros(&device, batch, hv, hk, v_head, kd, vd));
+            st.recurrent = new_rec;
+            if let Some((cq, ck, cv)) = conv_out {
+                st.conv_q = cq;
+                st.conv_k = ck;
+                st.conv_v = cv;
+            }
+            o
         } else {
+            // Read-only: consume the recurrent state without modifying it.
             let mem = state
-                .clone()
-                .unwrap_or_else(|| Tensor::zeros([batch, hv, hk, vd / hv], &projected.q.device()));
-            let out = projected
+                .as_ref()
+                .map(|s| s.recurrent.clone())
+                .unwrap_or_else(|| Tensor::zeros([batch, hv, hk, v_head], &projected.q.device()));
+            projected
                 .q
-                .matmul(mem.clone())
+                .matmul(mem)
                 .mul_scalar(scale)
-                .permute([0, 2, 1, 3]);
-            (out, Some(mem))
+                .permute([0, 2, 1, 3])
         };
-        *state = new_state;
 
         let out_4d = output.permute([0, 2, 1, 3]);
         let out_norm =
@@ -199,13 +326,14 @@ impl<B: Backend> GatedDeltaNet2<B> {
     pub fn forward_train(&self, hidden_states: Tensor<B, 3>) -> Tensor<B, 3> {
         self.validate(&hidden_states);
         let [batch, tokens, _] = hidden_states.shape().dims::<3>();
-        let projected = self.project(hidden_states);
+        let (projected, _conv_out) = self.project(hidden_states, None);
         let hk = self.config.head_dim;
         let hv = projected.hv;
         let vd = projected.vd;
+        let v_head = vd / hv;
         let scale = (hk as f64).powf(-0.5);
         let device = projected.q.device();
-        let state = Tensor::zeros([batch, hv, hk, vd / hv], &device);
+        let state = Tensor::zeros([batch, hv, hk, v_head], &device);
 
         let output = match self.config.mode {
             Gdn2Mode::FusedRecurrent => {
@@ -247,7 +375,14 @@ impl<B: Backend> GatedDeltaNet2<B> {
     }
 
     /// Shared projection pipeline: input → Q/K/V/B/W + gates.
-    pub fn project(&self, hidden_states: Tensor<B, 3>) -> ProjectedInputs<'_, B> {
+    ///
+    /// `conv_cache` optionally carries the short-convolution context from a
+    /// previous call; returns the updated context as the second element.
+    pub fn project(
+        &self,
+        hidden_states: Tensor<B, 3>,
+        conv_cache: Option<(&Tensor<B, 3>, &Tensor<B, 3>, &Tensor<B, 3>)>,
+    ) -> (ProjectedInputs<'_, B>, Option<ConvCache<B>>) {
         let [batch, tokens, _] = hidden_states.shape().dims::<3>();
         let h = self.config.num_heads;
         let hk = self.config.head_dim;
@@ -266,20 +401,17 @@ impl<B: Backend> GatedDeltaNet2<B> {
         let k_raw = self.k_proj.forward(hidden_states.clone());
         let v_raw = self.v_proj.forward(hidden_states.clone());
 
-        let q_act = if use_sc {
-            short_conv_1d(q_raw, self.q_conv_w.val())
+        let (q_act, k_act, v_act, conv_out) = if use_sc {
+            let cache = conv_cache.map(|(q, k, v)| (q.clone(), k.clone(), v.clone()));
+            let (q_act, cq) =
+                short_conv_1d(q_raw, self.q_conv_w.val(), cache.as_ref().map(|c| &c.0));
+            let (k_act, ck) =
+                short_conv_1d(k_raw, self.k_conv_w.val(), cache.as_ref().map(|c| &c.1));
+            let (v_act, cv) =
+                short_conv_1d(v_raw, self.v_conv_w.val(), cache.as_ref().map(|c| &c.2));
+            (q_act, k_act, v_act, Some((cq, ck, cv)))
         } else {
-            silu(q_raw)
-        };
-        let k_act = if use_sc {
-            short_conv_1d(k_raw, self.k_conv_w.val())
-        } else {
-            silu(k_raw)
-        };
-        let v_act = if use_sc {
-            short_conv_1d(v_raw, self.v_conv_w.val())
-        } else {
-            silu(v_raw)
+            (silu(q_raw), silu(k_raw), silu(v_raw), None)
         };
 
         let f_hid = self.f_proj_0.forward(hidden_states.clone());
@@ -310,16 +442,16 @@ impl<B: Backend> GatedDeltaNet2<B> {
         let b_gate = sigmoid(self.b_proj.forward(hidden_states.clone()));
         let w_gate = sigmoid(self.w_proj.forward(hidden_states.clone()));
 
-        // L2-normalize q and k along the head dimension
-        let q_norm = l2_normalize(q_act, 1e-6);
-        let k_norm = l2_normalize(k_act, 1e-6);
-
-        let mut q_4d = to_4d(q_norm, h, hk);
-        let mut k_4d = to_4d(k_norm, h, hk);
+        let mut q_4d = to_4d(q_act, h, hk);
+        let mut k_4d = to_4d(k_act, h, hk);
         let v_4d = to_4d(v_act, hv, v_head);
         let mut g_4d = to_4d(g, h, hk);
         let mut b_4d = to_4d(b_gate, h, hk);
         let w_4d = to_4d(w_gate, hv, v_head);
+
+        // L2-normalize q and k per head (matching the reference kernels).
+        q_4d = l2_normalize_4d(q_4d, 1e-6);
+        k_4d = l2_normalize_4d(k_4d, 1e-6);
 
         // Repeat key-side tensors for grouped value attention (GVA)
         if hv > h {
@@ -343,20 +475,23 @@ impl<B: Backend> GatedDeltaNet2<B> {
         let gate_signal = self.g_proj_1.forward(g_hid);
         let gate_4d = gate_signal.reshape([batch, tokens, hv, v_head]);
 
-        ProjectedInputs {
-            q: q_4d,
-            k: k_4d,
-            v: v_4d,
-            g: g_4d,
-            b: b_4d,
-            w: w_4d,
-            gate: gate_4d,
-            o_norm: self.o_norm_weight.val(),
-            eps: self.config.norm_eps,
-            o_proj: &self.o_proj,
-            hv,
-            vd,
-        }
+        (
+            ProjectedInputs {
+                q: q_4d,
+                k: k_4d,
+                v: v_4d,
+                g: g_4d,
+                b: b_4d,
+                w: w_4d,
+                gate: gate_4d,
+                o_norm: self.o_norm_weight.val(),
+                eps: self.config.norm_eps,
+                o_proj: &self.o_proj,
+                hv,
+                vd,
+            },
+            conv_out,
+        )
     }
 }
 

@@ -6,7 +6,7 @@ use burn::backend::{ndarray::NdArrayDevice, NdArray};
 use burn::module::Param;
 use burn::nn::{Linear, LinearConfig};
 use burn::tensor::{Tensor, TensorData};
-use burn_gdn2::{GatedDeltaNet2, Gdn2Config, Gdn2Mode};
+use burn_gdn2::{GatedDeltaNet2, Gdn2Config, Gdn2Mode, Gdn2State};
 
 const EPSILON: f32 = 5e-4;
 
@@ -161,7 +161,7 @@ fn test_gdn2_1000_cases() {
         let input = t3(&in_data, &in_shape, &device);
         let ref_out = t3(&out_data, &out_shape, &device);
 
-        let mut state: Option<Tensor<NdArray, 4>> = None;
+        let mut state: Option<Gdn2State<NdArray>> = None;
         let output = module.forward(input, &mut state, true);
 
         let out_bytes: Vec<f32> = output
@@ -251,7 +251,7 @@ fn bench_model<B: burn::tensor::backend::Backend>(
                     20
                 };
                 let input = Tensor::<B, 3>::zeros([1, seq_len, bc.d], device);
-                let mut state: Option<Tensor<B, 4>> = None;
+                let mut state: Option<burn_gdn2::Gdn2State<B>> = None;
 
                 for _ in 0..3 {
                     let _ = match mode {

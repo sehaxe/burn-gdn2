@@ -58,6 +58,9 @@ pub fn fused_recurrent_forward<B: Backend>(
 ///
 /// When `update_state` is true, the state is modified in-place (normal
 /// autoregressive decoding). When false, the state is read-only (prefill).
+///
+/// With the `cuda` feature, single-token steps (autoregressive decoding) are
+/// executed by one fused cubecl kernel instead of ~8 tensor ops.
 #[allow(clippy::too_many_arguments)]
 pub fn fused_recurrent_gdn2<B: Backend>(
     q: Tensor<B, 4>,
@@ -70,11 +73,28 @@ pub fn fused_recurrent_gdn2<B: Backend>(
     scale: f64,
     update_state: bool,
 ) -> (Tensor<B, 4>, Option<Tensor<B, 4>>) {
-    let [batch, hv, _time, _] = v.shape().dims::<4>();
+    let [batch, hv, _time, _] = q.shape().dims::<4>();
     let [_, _, _, k_dim] = k.shape().dims::<4>();
     let v_dim = v.shape().dims::<4>()[3];
 
     let s = state.unwrap_or_else(|| Tensor::zeros([batch, hv, k_dim, v_dim], &q.device()));
+
+    // Autoregressive decoding (one token): single fused kernel launch.
+    #[cfg(feature = "cuda")]
+    if update_state && _time == 1 {
+        if let Some((o, s)) = crate::kernel::fused_recurrent_cube::cuda::fused_step::<B>(
+            q.clone(),
+            k.clone(),
+            v.clone(),
+            g.clone(),
+            b.clone(),
+            w.clone(),
+            s.clone(),
+            scale,
+        ) {
+            return (o, Some(s));
+        }
+    }
 
     let (output, new_state) = if update_state {
         fused_recurrent_forward(q, k, v, g, b, w, s, scale)

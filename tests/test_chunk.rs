@@ -5,7 +5,7 @@ fn test_chunk_vs_reference() {
     use burn::module::Param;
     use burn::nn::{Linear, LinearConfig};
     use burn::tensor::{Tensor, TensorData};
-    use burn_gdn2::{GatedDeltaNet2, Gdn2Config, Gdn2Mode};
+    use burn_gdn2::{GatedDeltaNet2, Gdn2Config, Gdn2Mode, Gdn2State};
     use std::io::{Cursor, Read};
 
     fn read_i32(c: &mut Cursor<&[u8]>) -> i32 {
@@ -155,7 +155,7 @@ fn test_chunk_vs_reference() {
                 Tensor::<NdArray, 3>::from_data(TensorData::new(in_data, in_shape), &device);
             let ref_out =
                 Tensor::<NdArray, 3>::from_data(TensorData::new(out_data, out_shape), &device);
-            let mut state: Option<Tensor<NdArray, 4>> = None;
+            let mut state: Option<Gdn2State<NdArray>> = None;
             let output = module.forward(input, &mut state, true);
             let out_bytes: Vec<f32> = output
                 .into_data()
