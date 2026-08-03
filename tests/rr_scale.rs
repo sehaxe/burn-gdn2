@@ -34,7 +34,6 @@ fn rr64_kernel(
     let mut s32_sh = Shared::<[f32]>::new_slice(KD * VD);
     let mut s16_sh = Shared::<[f16]>::new_slice(KD * VD);
     let mut diag_sh = Shared::<[f16]>::new_slice(KD * KD);
-    
 
     let s0 = cmma::Matrix::<f32>::from_value(
         cmma::MatrixIdent::Accumulator,
@@ -192,8 +191,7 @@ fn rr64_kernel(
             diag16_sh0[i] = f16::cast_from(0.0f32);
         }
         for i in 0..16usize {
-            diag16_sh0[i * 16 + i] =
-                f16::cast_from(g_all[hw * KD + i]) - f16::cast_from(1.0f32);
+            diag16_sh0[i * 16 + i] = f16::cast_from(g_all[hw * KD + i]) - f16::cast_from(1.0f32);
         }
         let d0 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::A,

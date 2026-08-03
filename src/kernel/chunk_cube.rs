@@ -882,6 +882,7 @@ pub mod cuda {
         pub u: Tensor<3>,
         pub kgd: Tensor<3>,
         pub glast: Tensor<2>,
+        pub qgt: Tensor<3>,
         pub wvt: Tensor<3>,
         pub out: Tensor<4>,
     }
@@ -988,6 +989,7 @@ pub mod cuda {
             u: u_blk,
             kgd,
             glast,
+            qgt,
             wvt,
             out,
         }
