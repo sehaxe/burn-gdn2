@@ -128,6 +128,18 @@ Invalid configurations (fractional `expand_v`, non-divisible `num_v_heads`,
 `num_v_heads < num_heads`, `chunk_size = 0`) panic with a clear message at
 construction.
 
+### Numerical stability (v0.5.1)
+
+The tensor chunk path is stable for **arbitrary chunk sizes**: decay is
+computed tile-locally in log space (16-token tiles, inter-tile weights
+`exp(G_p - G_q) <= 1`), and the WY solve runs per tile. A naive
+`K / exp(cumsum(g))` overflows f32 once `cumsum(g) < -88` (chunk > 17 at
+`g_min = -5`), and a full-chunk WY solve blows up f32 error: `(I - T)^-1`
+has `|T| ~ |k_i| sum_j |k_j| > 1` and rank <= K, so the error grows ~`|T|^K`
+(6^8 on a 64-chunk vs 1.6^8 on a tile). The tile-local solve keeps both in
+check; `tests/stable_chunk.rs` verifies `chunk_wy_forward` against the exact
+per-token recurrence for chunk sizes 16 and 64 under weak and strong decay.
+
 ## Performance
 
 Measured on RTX 5060 Ti, release build, Burn 0.21, fp32, best-of-N loop
