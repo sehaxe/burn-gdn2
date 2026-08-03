@@ -131,8 +131,10 @@ construction.
 ## Performance
 
 Measured on RTX 5060 Ti, release build, Burn 0.21, fp32, best-of-N loop
-timing. `burn-gdn2` runs through the fused chunked CUDA kernels; the NVlabs
-side is their Triton implementation (`chunk_gdn2`).
+timing. The fused path (and therefore the comparison) is **NVIDIA/CUDA only**
+— the fused kernels are gated on the bare CUDA backend; every other backend
+falls back to the tensor path. `burn-gdn2` runs through the fused chunked CUDA
+kernels; the NVlabs side is their Triton implementation (`chunk_gdn2`).
 
 | Config | burn-gdn2 | NVlabs Triton | vs NVlabs |
 |--------|-----------|---------------|-----------|
@@ -145,6 +147,24 @@ Small/medium configs win by a wide margin; long sequences with wide heads
 (large/xl) still lose to the Triton recurrence, whose register-resident state
 avoids our per-chunk shared-memory barrier chain. The chunk-size is fixed at
 64 in both implementations.
+
+### Per-operation breakdown (d=2048, T=4096, xl)
+
+The reference implementation splits the forward into separate Triton kernels;
+the equivalent work inside our two fused kernels breaks down as follows
+(isolated phase timings; the fused total is less than the sum because the
+phases overlap across blocks):
+
+| Operation | burn-gdn2 | NVlabs Triton | vs NVlabs |
+|-----------|-----------|---------------|-----------|
+| chunk-local precompute + solve (intra) | 1.86 ms | 0.78 ms | 2.4× slower |
+| recurrence (v_new + state update) | 1.40 ms | 0.28 ms | 5.0× slower |
+| output (aqk·v_new + qg·S) | 1.29 ms | 0.30 ms | 4.3× slower |
+| decay cumsum | fused into intra | 0.08 ms | — |
+
+The recurrence and output phases are where the Triton kernels pull ahead:
+register-resident state with tensor-core dots, no per-chunk barriers. These
+two phases are the target of ongoing kernel work.
 
 Run it yourself:
 
