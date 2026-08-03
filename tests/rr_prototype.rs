@@ -30,7 +30,7 @@ fn rr_kernel(
     nt: u32,
     out: &mut [f32],
 ) {
-    let mut s = cmma::Matrix::<f32>::from_value(
+    let s = cmma::Matrix::<f32>::from_value(
         cmma::MatrixIdent::Accumulator,
         16usize,
         16usize,
@@ -124,7 +124,7 @@ fn rr_kernel(
             qg_all.slice(jj * 256usize, (jj + 1) * 256usize),
             16u32,
         );
-        let mut o = cmma::Matrix::<f32>::from_value(
+        let o = cmma::Matrix::<f32>::from_value(
             cmma::MatrixIdent::Accumulator,
             16usize,
             16usize,
@@ -146,7 +146,7 @@ fn rr_kernel(
 #[test]
 fn rr_prototype_full() {
     const NT: usize = 8;
-    let mut rng = |x: usize| -> f32 { ((x * 2654435761usize) % 1000) as f32 / 1000.0 - 0.5 };
+    let rng = |x: usize| -> f32 { ((x * 2654435761usize) % 1000) as f32 / 1000.0 - 0.5 };
     let mk = |n: usize| -> Vec<f16> { (0..n).map(|i| f16::from_f32(rng(i) * 0.5)).collect() };
     let w_all = mk(NT * 256);
     let u_all = mk(NT * 256);
