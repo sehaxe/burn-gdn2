@@ -3,6 +3,9 @@
 //! S = diag(glast)@S + kgd^T@vn. All dots via tensor cores (f16, f32 acc).
 //! One warp per (head, v-slice of 16); S in 8 accumulators.
 
+use burn::tensor::{Device, Distribution, Tensor};
+use burn_gdn2::kernel::chunk_cube::cuda::{inter_launch_raw, intra_launch_raw};
+use burn_gdn2::Gdn2Config;
 use cubecl::cmma;
 use cubecl::prelude::*;
 use half::f16;
@@ -2809,10 +2812,6 @@ fn rr_inter_kernel(
         sb[(i / 16) * 128 + n0 + (i % 16)] = s32_sh[i];
     }
 }
-use burn::tensor::{Device, Distribution, Tensor};
-use burn_gdn2::kernel::chunk_cube::cuda::{inter_launch_raw, intra_launch_raw};
-use burn_gdn2::Gdn2Config;
-
 #[test]
 #[ignore]
 fn rr_inter_bench() {
@@ -2853,51 +2852,36 @@ fn rr_inter_bench() {
         8,
     );
     let _ = io.out.clone().into_data();
-    // старый inter: 5 вызовов + 1 sync
-    for _ in 0..3 {
-        let o = inter_launch_raw::<Bare>(
-            io.aqk.clone(),
-            io.w.clone(),
-            io.u.clone(),
-            io.qgt.clone(),
-            io.kgd.clone(),
-            io.glast.clone(),
-            state.clone(),
-            io.out.clone(),
-            scale,
-            CS,
-            NT,
-            HEADS,
-            2,
-            1,
-            7,
+    for n in [1usize, 2, 4] {
+
+        let t0 = std::time::Instant::now();        let mut last = None;
+        for _ in 0..n {
+            last = Some(inter_launch_raw::<Bare>(
+                io.aqk.clone(),
+                io.w.clone(),
+                io.u.clone(),
+                io.qgt.clone(),
+                io.kgd.clone(),
+                io.glast.clone(),
+                state.clone(),
+                io.out.clone(),
+                scale,
+                CS,
+                NT,
+                HEADS,
+                2,
+                1,
+                7,
+            ));
+        }
+        let lc = last.unwrap().try_into_primitive::<Bare>().unwrap();
+        let _ = lc.client.read_one_unchecked(lc.handle);
+        println!(
+            "old inter xl: {n} calls = {:?}us ({:?}/call)",
+            t0.elapsed().as_micros(),
+            t0.elapsed().as_micros() / n as u128
         );
-        let _ = o.clone().into_data();
     }
-    let t0 = std::time::Instant::now();
-    let mut last = None;
-    for _ in 0..5 {
-        last = Some(inter_launch_raw::<Bare>(
-            io.aqk.clone(),
-            io.w.clone(),
-            io.u.clone(),
-            io.qgt.clone(),
-            io.kgd.clone(),
-            io.glast.clone(),
-            state.clone(),
-            io.out.clone(),
-            scale,
-            CS,
-            NT,
-            HEADS,
-            2,
-            1,
-            7,
-        ));
-    }
-    let lc = last.unwrap().try_into_primitive::<Bare>().unwrap();
-    let _ = lc.client.read_one_unchecked(lc.handle);
-    println!("old inter xl: {:?}us", t0.elapsed().as_micros() / 5);
     // rr inter
     let f = |t: &Tensor<3>| t.clone().try_into_primitive::<Bare>().unwrap();
     let g = |t: &Tensor<2>| t.clone().try_into_primitive::<Bare>().unwrap();
@@ -2932,27 +2916,33 @@ fn rr_inter_bench() {
         }
         let _ = client.read_one_unchecked(out_h.clone());
     }
-    let t0 = std::time::Instant::now();
-    for _ in 0..5 {
-        unsafe {
-            rr_inter_kernel::launch(
-                &client,
-                CubeCount::Static(HEADS as u32, (VD / 16) as u32, 1),
-                CubeDim { x: 32, y: 1, z: 1 },
-                BufferArg::from_raw_parts(w_c.handle.clone(), HEADS * NT * KD * C),
-                BufferArg::from_raw_parts(u_c.handle.clone(), HEADS * NT * C * VD),
-                BufferArg::from_raw_parts(qg_c.handle.clone(), HEADS * NT * KD * C),
-                BufferArg::from_raw_parts(kgd_c.handle.clone(), HEADS * NT * C * KD),
-                BufferArg::from_raw_parts(aqk_c.handle.clone(), HEADS * NT * C * C),
-                BufferArg::from_raw_parts(glast_c.handle.clone(), HEADS * NT * KD),
-                BufferArg::from_raw_parts(st.handle.clone(), HEADS * KD * VD),
-                BufferArg::from_raw_parts(state_out_h.clone(), HEADS * KD * VD),
-                BufferArg::from_raw_parts(out_h.clone(), HEADS * NT * C * VD),
-                NT as u32,
-                scale as f32,
-            );
+    for n in [1usize, 2, 4] {
+
+        let t0 = std::time::Instant::now();        for _ in 0..n {
+            unsafe {
+                rr_inter_kernel::launch(
+                    &client,
+                    CubeCount::Static(HEADS as u32, (VD / 16) as u32, 1),
+                    CubeDim { x: 32, y: 1, z: 1 },
+                    BufferArg::from_raw_parts(w_c.handle.clone(), HEADS * NT * KD * C),
+                    BufferArg::from_raw_parts(u_c.handle.clone(), HEADS * NT * C * VD),
+                    BufferArg::from_raw_parts(qg_c.handle.clone(), HEADS * NT * KD * C),
+                    BufferArg::from_raw_parts(kgd_c.handle.clone(), HEADS * NT * C * KD),
+                    BufferArg::from_raw_parts(aqk_c.handle.clone(), HEADS * NT * C * C),
+                    BufferArg::from_raw_parts(glast_c.handle.clone(), HEADS * NT * KD),
+                    BufferArg::from_raw_parts(st.handle.clone(), HEADS * KD * VD),
+                    BufferArg::from_raw_parts(state_out_h.clone(), HEADS * KD * VD),
+                    BufferArg::from_raw_parts(out_h.clone(), HEADS * NT * C * VD),
+                    NT as u32,
+                    scale as f32,
+                );
+            }
         }
+        let _ = client.read_one_unchecked(out_h.clone());
+        println!(
+            "rr inter xl: {n} calls = {:?}us ({:?}/call)",
+            t0.elapsed().as_micros(),
+            t0.elapsed().as_micros() / n as u128
+        );
     }
-    let _ = client.read_one_unchecked(out_h.clone());
-    println!("rr inter xl: {:?}us", t0.elapsed().as_micros() / 5);
 }

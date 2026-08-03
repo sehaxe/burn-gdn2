@@ -1,13 +1,13 @@
 //! Register-resident inter recurrence with the REAL GDN-2 step (matches
 //! `gdn2_chunk_inter_kernel` math): vn = u - w@S, out = aqk@vn + scale*qg@S,
 //! S = diag(glast)@S + kgd^T@vn. All dots via tensor cores (f16, f32 acc).
-//! One warp per (head, v-slice of 16); S in 8 accumulators.
+//! One warp per (head, v-slice of 16); S in 4 accumulators.
 
 use cubecl::cmma;
 use cubecl::prelude::*;
 use half::f16;
 
-const KD: usize = 128;
+const KD: usize = 64;
 const C: usize = 64;
 
 #[cube(launch)]
@@ -27,8 +27,8 @@ fn rr_inter_kernel(
     let head = CUBE_POS_X as usize;
     let ntile = CUBE_POS_Y as usize;
     let n0 = ntile * 16usize;
-    let u_stride = C * 128;
-    let out_stride = C * 128;
+    let u_stride = C * 64;
+    let out_stride = C * 64;
     let base = head;
 
     let mut w_sh = Shared::<[f16]>::new_slice(C * KD);
@@ -51,7 +51,7 @@ fn rr_inter_kernel(
         eye16_sh[i * 16 + i] = f16::cast_from(1.0f32);
     }
     for i in 0..KD * 16 {
-        s32_sh[i] = state_in[base * KD * 128 + (i / 16) * 128 + n0 + (i % 16)];
+        s32_sh[i] = state_in[base * KD * 64 + (i / 16) * 64 + n0 + (i % 16)];
     }
     sync_cube();
     for i in 0..KD * 16 {
@@ -139,78 +139,6 @@ fn rr_inter_kernel(
         0.0f32,
     );
     cmma::execute(&eye, &b3, &s3, &s3);
-    let b4 = cmma::Matrix::<f16>::from_slice(
-        cmma::MatrixIdent::B,
-        16usize,
-        16usize,
-        16usize,
-        cmma::MatrixLayout::RowMajor,
-        &s16_sh[1024..1280],
-        16u32,
-    );
-    let s4 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator,
-        16usize,
-        16usize,
-        16usize,
-        cmma::MatrixLayout::Undefined,
-        0.0f32,
-    );
-    cmma::execute(&eye, &b4, &s4, &s4);
-    let b5 = cmma::Matrix::<f16>::from_slice(
-        cmma::MatrixIdent::B,
-        16usize,
-        16usize,
-        16usize,
-        cmma::MatrixLayout::RowMajor,
-        &s16_sh[1280..1536],
-        16u32,
-    );
-    let s5 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator,
-        16usize,
-        16usize,
-        16usize,
-        cmma::MatrixLayout::Undefined,
-        0.0f32,
-    );
-    cmma::execute(&eye, &b5, &s5, &s5);
-    let b6 = cmma::Matrix::<f16>::from_slice(
-        cmma::MatrixIdent::B,
-        16usize,
-        16usize,
-        16usize,
-        cmma::MatrixLayout::RowMajor,
-        &s16_sh[1536..1792],
-        16u32,
-    );
-    let s6 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator,
-        16usize,
-        16usize,
-        16usize,
-        cmma::MatrixLayout::Undefined,
-        0.0f32,
-    );
-    cmma::execute(&eye, &b6, &s6, &s6);
-    let b7 = cmma::Matrix::<f16>::from_slice(
-        cmma::MatrixIdent::B,
-        16usize,
-        16usize,
-        16usize,
-        cmma::MatrixLayout::RowMajor,
-        &s16_sh[1792..2048],
-        16u32,
-    );
-    let s7 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator,
-        16usize,
-        16usize,
-        16usize,
-        cmma::MatrixLayout::Undefined,
-        0.0f32,
-    );
-    cmma::execute(&eye, &b7, &s7, &s7);
     for j in range_stepped(0u32, nt, 1u32) {
         let jj = j as usize;
         let hw = base * (nt as usize) + jj;
@@ -224,7 +152,7 @@ fn rr_inter_kernel(
         for i in 0..C * 16 {
             let t = i / 16;
             let v = i % 16;
-            u_sh[t * 16 + v] = f16::cast_from(u_all[hw * u_stride + t * 128 + n0 + v]);
+            u_sh[t * 16 + v] = f16::cast_from(u_all[hw * u_stride + t * 64 + n0 + v]);
         }
         for i in 0..C * KD {
             let t = i / KD;
@@ -259,30 +187,6 @@ fn rr_inter_kernel(
         cmma::store(
             s32_sh.as_mut_slice().slice_mut(768usize, 1024usize),
             &s3,
-            16u32,
-            cmma::MatrixLayout::RowMajor,
-        );
-        cmma::store(
-            s32_sh.as_mut_slice().slice_mut(1024usize, 1280usize),
-            &s4,
-            16u32,
-            cmma::MatrixLayout::RowMajor,
-        );
-        cmma::store(
-            s32_sh.as_mut_slice().slice_mut(1280usize, 1536usize),
-            &s5,
-            16u32,
-            cmma::MatrixLayout::RowMajor,
-        );
-        cmma::store(
-            s32_sh.as_mut_slice().slice_mut(1536usize, 1792usize),
-            &s6,
-            16u32,
-            cmma::MatrixLayout::RowMajor,
-        );
-        cmma::store(
-            s32_sh.as_mut_slice().slice_mut(1792usize, 2048usize),
-            &s7,
             16u32,
             cmma::MatrixLayout::RowMajor,
         );
@@ -330,8 +234,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &w_sh[0..2048],
-            128u32,
+            &w_sh[0..1024],
+            64u32,
         );
         let sb0_0 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -349,8 +253,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &w_sh[2048..4096],
-            128u32,
+            &w_sh[1024..2048],
+            64u32,
         );
         let sb0_1 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -368,8 +272,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &w_sh[4096..6144],
-            128u32,
+            &w_sh[2048..3072],
+            64u32,
         );
         let sb0_2 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -387,8 +291,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &w_sh[6144..8192],
-            128u32,
+            &w_sh[3072..4096],
+            64u32,
         );
         let sb0_3 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -406,8 +310,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &w_sh[16..2064],
-            128u32,
+            &w_sh[16..1040],
+            64u32,
         );
         let sb1_0 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -425,8 +329,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &w_sh[2064..4112],
-            128u32,
+            &w_sh[1040..2064],
+            64u32,
         );
         let sb1_1 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -444,8 +348,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &w_sh[4112..6160],
-            128u32,
+            &w_sh[2064..3088],
+            64u32,
         );
         let sb1_2 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -463,8 +367,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &w_sh[6160..8208],
-            128u32,
+            &w_sh[3088..4112],
+            64u32,
         );
         let sb1_3 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -482,8 +386,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &w_sh[32..2080],
-            128u32,
+            &w_sh[32..1056],
+            64u32,
         );
         let sb2_0 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -501,8 +405,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &w_sh[2080..4128],
-            128u32,
+            &w_sh[1056..2080],
+            64u32,
         );
         let sb2_1 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -520,8 +424,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &w_sh[4128..6176],
-            128u32,
+            &w_sh[2080..3104],
+            64u32,
         );
         let sb2_2 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -539,8 +443,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &w_sh[6176..8224],
-            128u32,
+            &w_sh[3104..4128],
+            64u32,
         );
         let sb2_3 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -558,8 +462,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &w_sh[48..2096],
-            128u32,
+            &w_sh[48..1072],
+            64u32,
         );
         let sb3_0 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -577,8 +481,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &w_sh[2096..4144],
-            128u32,
+            &w_sh[1072..2096],
+            64u32,
         );
         let sb3_1 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -596,8 +500,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &w_sh[4144..6192],
-            128u32,
+            &w_sh[2096..3120],
+            64u32,
         );
         let sb3_2 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -615,8 +519,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &w_sh[6192..8240],
-            128u32,
+            &w_sh[3120..4144],
+            64u32,
         );
         let sb3_3 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -628,310 +532,6 @@ fn rr_inter_kernel(
             16u32,
         );
         cmma::execute(&wm3_3, &sb3_3, &vn3, &vn3);
-        let wm4_0 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &w_sh[64..2112],
-            128u32,
-        );
-        let sb4_0 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1024..1280],
-            16u32,
-        );
-        cmma::execute(&wm4_0, &sb4_0, &vn0, &vn0);
-        let wm4_1 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &w_sh[2112..4160],
-            128u32,
-        );
-        let sb4_1 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1024..1280],
-            16u32,
-        );
-        cmma::execute(&wm4_1, &sb4_1, &vn1, &vn1);
-        let wm4_2 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &w_sh[4160..6208],
-            128u32,
-        );
-        let sb4_2 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1024..1280],
-            16u32,
-        );
-        cmma::execute(&wm4_2, &sb4_2, &vn2, &vn2);
-        let wm4_3 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &w_sh[6208..8256],
-            128u32,
-        );
-        let sb4_3 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1024..1280],
-            16u32,
-        );
-        cmma::execute(&wm4_3, &sb4_3, &vn3, &vn3);
-        let wm5_0 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &w_sh[80..2128],
-            128u32,
-        );
-        let sb5_0 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1280..1536],
-            16u32,
-        );
-        cmma::execute(&wm5_0, &sb5_0, &vn0, &vn0);
-        let wm5_1 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &w_sh[2128..4176],
-            128u32,
-        );
-        let sb5_1 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1280..1536],
-            16u32,
-        );
-        cmma::execute(&wm5_1, &sb5_1, &vn1, &vn1);
-        let wm5_2 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &w_sh[4176..6224],
-            128u32,
-        );
-        let sb5_2 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1280..1536],
-            16u32,
-        );
-        cmma::execute(&wm5_2, &sb5_2, &vn2, &vn2);
-        let wm5_3 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &w_sh[6224..8272],
-            128u32,
-        );
-        let sb5_3 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1280..1536],
-            16u32,
-        );
-        cmma::execute(&wm5_3, &sb5_3, &vn3, &vn3);
-        let wm6_0 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &w_sh[96..2144],
-            128u32,
-        );
-        let sb6_0 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1536..1792],
-            16u32,
-        );
-        cmma::execute(&wm6_0, &sb6_0, &vn0, &vn0);
-        let wm6_1 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &w_sh[2144..4192],
-            128u32,
-        );
-        let sb6_1 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1536..1792],
-            16u32,
-        );
-        cmma::execute(&wm6_1, &sb6_1, &vn1, &vn1);
-        let wm6_2 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &w_sh[4192..6240],
-            128u32,
-        );
-        let sb6_2 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1536..1792],
-            16u32,
-        );
-        cmma::execute(&wm6_2, &sb6_2, &vn2, &vn2);
-        let wm6_3 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &w_sh[6240..8288],
-            128u32,
-        );
-        let sb6_3 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1536..1792],
-            16u32,
-        );
-        cmma::execute(&wm6_3, &sb6_3, &vn3, &vn3);
-        let wm7_0 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &w_sh[112..2160],
-            128u32,
-        );
-        let sb7_0 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1792..2048],
-            16u32,
-        );
-        cmma::execute(&wm7_0, &sb7_0, &vn0, &vn0);
-        let wm7_1 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &w_sh[2160..4208],
-            128u32,
-        );
-        let sb7_1 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1792..2048],
-            16u32,
-        );
-        cmma::execute(&wm7_1, &sb7_1, &vn1, &vn1);
-        let wm7_2 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &w_sh[4208..6256],
-            128u32,
-        );
-        let sb7_2 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1792..2048],
-            16u32,
-        );
-        cmma::execute(&wm7_2, &sb7_2, &vn2, &vn2);
-        let wm7_3 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &w_sh[6256..8304],
-            128u32,
-        );
-        let sb7_3 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1792..2048],
-            16u32,
-        );
-        cmma::execute(&wm7_3, &sb7_3, &vn3, &vn3);
         // vn -> u - vn (shared elementwise)
         cmma::store(
             vn32_sh.as_mut_slice(),
@@ -1001,8 +601,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &qg_sh[0..2048],
-            128u32,
+            &qg_sh[0..1024],
+            64u32,
         );
         let sb20_0 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -1020,8 +620,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &qg_sh[2048..4096],
-            128u32,
+            &qg_sh[1024..2048],
+            64u32,
         );
         let sb20_1 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -1039,8 +639,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &qg_sh[4096..6144],
-            128u32,
+            &qg_sh[2048..3072],
+            64u32,
         );
         let sb20_2 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -1058,8 +658,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &qg_sh[6144..8192],
-            128u32,
+            &qg_sh[3072..4096],
+            64u32,
         );
         let sb20_3 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -1077,8 +677,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &qg_sh[16..2064],
-            128u32,
+            &qg_sh[16..1040],
+            64u32,
         );
         let sb21_0 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -1096,8 +696,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &qg_sh[2064..4112],
-            128u32,
+            &qg_sh[1040..2064],
+            64u32,
         );
         let sb21_1 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -1115,8 +715,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &qg_sh[4112..6160],
-            128u32,
+            &qg_sh[2064..3088],
+            64u32,
         );
         let sb21_2 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -1134,8 +734,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &qg_sh[6160..8208],
-            128u32,
+            &qg_sh[3088..4112],
+            64u32,
         );
         let sb21_3 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -1153,8 +753,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &qg_sh[32..2080],
-            128u32,
+            &qg_sh[32..1056],
+            64u32,
         );
         let sb22_0 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -1172,8 +772,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &qg_sh[2080..4128],
-            128u32,
+            &qg_sh[1056..2080],
+            64u32,
         );
         let sb22_1 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -1191,8 +791,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &qg_sh[4128..6176],
-            128u32,
+            &qg_sh[2080..3104],
+            64u32,
         );
         let sb22_2 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -1210,8 +810,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &qg_sh[6176..8224],
-            128u32,
+            &qg_sh[3104..4128],
+            64u32,
         );
         let sb22_3 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -1229,8 +829,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &qg_sh[48..2096],
-            128u32,
+            &qg_sh[48..1072],
+            64u32,
         );
         let sb23_0 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -1248,8 +848,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &qg_sh[2096..4144],
-            128u32,
+            &qg_sh[1072..2096],
+            64u32,
         );
         let sb23_1 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -1267,8 +867,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &qg_sh[4144..6192],
-            128u32,
+            &qg_sh[2096..3120],
+            64u32,
         );
         let sb23_2 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -1286,8 +886,8 @@ fn rr_inter_kernel(
             16usize,
             16usize,
             cmma::MatrixLayout::RowMajor,
-            &qg_sh[6192..8240],
-            128u32,
+            &qg_sh[3120..4144],
+            64u32,
         );
         let sb23_3 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
@@ -1299,310 +899,6 @@ fn rr_inter_kernel(
             16u32,
         );
         cmma::execute(&qm3_3, &sb23_3, &o3, &o3);
-        let qm4_0 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &qg_sh[64..2112],
-            128u32,
-        );
-        let sb24_0 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1024..1280],
-            16u32,
-        );
-        cmma::execute(&qm4_0, &sb24_0, &o0, &o0);
-        let qm4_1 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &qg_sh[2112..4160],
-            128u32,
-        );
-        let sb24_1 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1024..1280],
-            16u32,
-        );
-        cmma::execute(&qm4_1, &sb24_1, &o1, &o1);
-        let qm4_2 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &qg_sh[4160..6208],
-            128u32,
-        );
-        let sb24_2 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1024..1280],
-            16u32,
-        );
-        cmma::execute(&qm4_2, &sb24_2, &o2, &o2);
-        let qm4_3 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &qg_sh[6208..8256],
-            128u32,
-        );
-        let sb24_3 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1024..1280],
-            16u32,
-        );
-        cmma::execute(&qm4_3, &sb24_3, &o3, &o3);
-        let qm5_0 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &qg_sh[80..2128],
-            128u32,
-        );
-        let sb25_0 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1280..1536],
-            16u32,
-        );
-        cmma::execute(&qm5_0, &sb25_0, &o0, &o0);
-        let qm5_1 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &qg_sh[2128..4176],
-            128u32,
-        );
-        let sb25_1 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1280..1536],
-            16u32,
-        );
-        cmma::execute(&qm5_1, &sb25_1, &o1, &o1);
-        let qm5_2 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &qg_sh[4176..6224],
-            128u32,
-        );
-        let sb25_2 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1280..1536],
-            16u32,
-        );
-        cmma::execute(&qm5_2, &sb25_2, &o2, &o2);
-        let qm5_3 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &qg_sh[6224..8272],
-            128u32,
-        );
-        let sb25_3 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1280..1536],
-            16u32,
-        );
-        cmma::execute(&qm5_3, &sb25_3, &o3, &o3);
-        let qm6_0 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &qg_sh[96..2144],
-            128u32,
-        );
-        let sb26_0 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1536..1792],
-            16u32,
-        );
-        cmma::execute(&qm6_0, &sb26_0, &o0, &o0);
-        let qm6_1 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &qg_sh[2144..4192],
-            128u32,
-        );
-        let sb26_1 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1536..1792],
-            16u32,
-        );
-        cmma::execute(&qm6_1, &sb26_1, &o1, &o1);
-        let qm6_2 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &qg_sh[4192..6240],
-            128u32,
-        );
-        let sb26_2 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1536..1792],
-            16u32,
-        );
-        cmma::execute(&qm6_2, &sb26_2, &o2, &o2);
-        let qm6_3 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &qg_sh[6240..8288],
-            128u32,
-        );
-        let sb26_3 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1536..1792],
-            16u32,
-        );
-        cmma::execute(&qm6_3, &sb26_3, &o3, &o3);
-        let qm7_0 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &qg_sh[112..2160],
-            128u32,
-        );
-        let sb27_0 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1792..2048],
-            16u32,
-        );
-        cmma::execute(&qm7_0, &sb27_0, &o0, &o0);
-        let qm7_1 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &qg_sh[2160..4208],
-            128u32,
-        );
-        let sb27_1 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1792..2048],
-            16u32,
-        );
-        cmma::execute(&qm7_1, &sb27_1, &o1, &o1);
-        let qm7_2 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &qg_sh[4208..6256],
-            128u32,
-        );
-        let sb27_2 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1792..2048],
-            16u32,
-        );
-        cmma::execute(&qm7_2, &sb27_2, &o2, &o2);
-        let qm7_3 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &qg_sh[6256..8304],
-            128u32,
-        );
-        let sb27_3 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1792..2048],
-            16u32,
-        );
-        cmma::execute(&qm7_3, &sb27_3, &o3, &o3);
         let am0_0 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::A,
             16usize,
@@ -1934,7 +1230,7 @@ fn rr_inter_kernel(
         );
         sync_cube();
         for i in 0..C * 16 {
-            out[hw * out_stride + (i / 16) * 128 + n0 + (i % 16)] = o32_sh[i];
+            out[hw * out_stride + (i / 16) * 64 + n0 + (i % 16)] = o32_sh[i];
         }
         sync_cube();
         // decay: S_m += (diag16_m - I) @ S_m
@@ -1942,7 +1238,8 @@ fn rr_inter_kernel(
             diag16_sh[i] = f16::cast_from(0.0f32);
         }
         for i in 0..16usize {
-            diag16_sh[i * 16 + i] = f16::cast_from(glast_all[hw * KD + i]) - f16::cast_from(1.0f32);
+            diag16_sh[i * 16 + i] =
+                f16::cast_from(glast_all[hw * KD + i]) - f16::cast_from(1.0f32);
         }
         let d0 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::A,
@@ -2041,110 +1338,6 @@ fn rr_inter_kernel(
             16u32,
         );
         cmma::execute(&d3, &sd3, &s3, &s3);
-        for i in 0..256usize {
-            diag16_sh[i] = f16::cast_from(0.0f32);
-        }
-        for i in 0..16usize {
-            diag16_sh[i * 16 + i] =
-                f16::cast_from(glast_all[hw * KD + 64 + i]) - f16::cast_from(1.0f32);
-        }
-        let d4 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &diag16_sh[0..256],
-            16u32,
-        );
-        let sd4 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1024..1280],
-            16u32,
-        );
-        cmma::execute(&d4, &sd4, &s4, &s4);
-        for i in 0..256usize {
-            diag16_sh[i] = f16::cast_from(0.0f32);
-        }
-        for i in 0..16usize {
-            diag16_sh[i * 16 + i] =
-                f16::cast_from(glast_all[hw * KD + 80 + i]) - f16::cast_from(1.0f32);
-        }
-        let d5 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &diag16_sh[0..256],
-            16u32,
-        );
-        let sd5 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1280..1536],
-            16u32,
-        );
-        cmma::execute(&d5, &sd5, &s5, &s5);
-        for i in 0..256usize {
-            diag16_sh[i] = f16::cast_from(0.0f32);
-        }
-        for i in 0..16usize {
-            diag16_sh[i * 16 + i] =
-                f16::cast_from(glast_all[hw * KD + 96 + i]) - f16::cast_from(1.0f32);
-        }
-        let d6 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &diag16_sh[0..256],
-            16u32,
-        );
-        let sd6 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1536..1792],
-            16u32,
-        );
-        cmma::execute(&d6, &sd6, &s6, &s6);
-        for i in 0..256usize {
-            diag16_sh[i] = f16::cast_from(0.0f32);
-        }
-        for i in 0..16usize {
-            diag16_sh[i * 16 + i] =
-                f16::cast_from(glast_all[hw * KD + 112 + i]) - f16::cast_from(1.0f32);
-        }
-        let d7 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &diag16_sh[0..256],
-            16u32,
-        );
-        let sd7 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &s16_sh[1792..2048],
-            16u32,
-        );
-        cmma::execute(&d7, &sd7, &s7, &s7);
         // S_m += kgd^T_m @ vn
         let km0_0 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::A,
@@ -2222,82 +1415,6 @@ fn rr_inter_kernel(
             16u32,
         );
         cmma::execute(&km0_3, &vb20_3, &s3, &s3);
-        let km0_4 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &kgd_sh[4096..5120],
-            64u32,
-        );
-        let vb20_4 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &vn16_sh[0..256],
-            16u32,
-        );
-        cmma::execute(&km0_4, &vb20_4, &s4, &s4);
-        let km0_5 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &kgd_sh[5120..6144],
-            64u32,
-        );
-        let vb20_5 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &vn16_sh[0..256],
-            16u32,
-        );
-        cmma::execute(&km0_5, &vb20_5, &s5, &s5);
-        let km0_6 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &kgd_sh[6144..7168],
-            64u32,
-        );
-        let vb20_6 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &vn16_sh[0..256],
-            16u32,
-        );
-        cmma::execute(&km0_6, &vb20_6, &s6, &s6);
-        let km0_7 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &kgd_sh[7168..8192],
-            64u32,
-        );
-        let vb20_7 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &vn16_sh[0..256],
-            16u32,
-        );
-        cmma::execute(&km0_7, &vb20_7, &s7, &s7);
         let km1_0 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::A,
             16usize,
@@ -2374,82 +1491,6 @@ fn rr_inter_kernel(
             16u32,
         );
         cmma::execute(&km1_3, &vb21_3, &s3, &s3);
-        let km1_4 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &kgd_sh[4112..5136],
-            64u32,
-        );
-        let vb21_4 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &vn16_sh[256..512],
-            16u32,
-        );
-        cmma::execute(&km1_4, &vb21_4, &s4, &s4);
-        let km1_5 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &kgd_sh[5136..6160],
-            64u32,
-        );
-        let vb21_5 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &vn16_sh[256..512],
-            16u32,
-        );
-        cmma::execute(&km1_5, &vb21_5, &s5, &s5);
-        let km1_6 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &kgd_sh[6160..7184],
-            64u32,
-        );
-        let vb21_6 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &vn16_sh[256..512],
-            16u32,
-        );
-        cmma::execute(&km1_6, &vb21_6, &s6, &s6);
-        let km1_7 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &kgd_sh[7184..8208],
-            64u32,
-        );
-        let vb21_7 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &vn16_sh[256..512],
-            16u32,
-        );
-        cmma::execute(&km1_7, &vb21_7, &s7, &s7);
         let km2_0 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::A,
             16usize,
@@ -2526,82 +1567,6 @@ fn rr_inter_kernel(
             16u32,
         );
         cmma::execute(&km2_3, &vb22_3, &s3, &s3);
-        let km2_4 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &kgd_sh[4128..5152],
-            64u32,
-        );
-        let vb22_4 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &vn16_sh[512..768],
-            16u32,
-        );
-        cmma::execute(&km2_4, &vb22_4, &s4, &s4);
-        let km2_5 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &kgd_sh[5152..6176],
-            64u32,
-        );
-        let vb22_5 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &vn16_sh[512..768],
-            16u32,
-        );
-        cmma::execute(&km2_5, &vb22_5, &s5, &s5);
-        let km2_6 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &kgd_sh[6176..7200],
-            64u32,
-        );
-        let vb22_6 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &vn16_sh[512..768],
-            16u32,
-        );
-        cmma::execute(&km2_6, &vb22_6, &s6, &s6);
-        let km2_7 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &kgd_sh[7200..8224],
-            64u32,
-        );
-        let vb22_7 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &vn16_sh[512..768],
-            16u32,
-        );
-        cmma::execute(&km2_7, &vb22_7, &s7, &s7);
         let km3_0 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::A,
             16usize,
@@ -2678,84 +1643,8 @@ fn rr_inter_kernel(
             16u32,
         );
         cmma::execute(&km3_3, &vb23_3, &s3, &s3);
-        let km3_4 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &kgd_sh[4144..5168],
-            64u32,
-        );
-        let vb23_4 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &vn16_sh[768..1024],
-            16u32,
-        );
-        cmma::execute(&km3_4, &vb23_4, &s4, &s4);
-        let km3_5 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &kgd_sh[5168..6192],
-            64u32,
-        );
-        let vb23_5 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &vn16_sh[768..1024],
-            16u32,
-        );
-        cmma::execute(&km3_5, &vb23_5, &s5, &s5);
-        let km3_6 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &kgd_sh[6192..7216],
-            64u32,
-        );
-        let vb23_6 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &vn16_sh[768..1024],
-            16u32,
-        );
-        cmma::execute(&km3_6, &vb23_6, &s6, &s6);
-        let km3_7 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &kgd_sh[7216..8240],
-            64u32,
-        );
-        let vb23_7 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B,
-            16usize,
-            16usize,
-            16usize,
-            cmma::MatrixLayout::RowMajor,
-            &vn16_sh[768..1024],
-            16u32,
-        );
-        cmma::execute(&km3_7, &vb23_7, &s7, &s7);
     }
-    let sb = state_out.slice_mut(base * KD * 128, (base + 1) * KD * 128);
+    let sb = state_out.slice_mut(base * KD * 64, (base + 1) * KD * 64);
     cmma::store(
         s32_sh.as_mut_slice(),
         &s0,
@@ -2780,32 +1669,8 @@ fn rr_inter_kernel(
         16u32,
         cmma::MatrixLayout::RowMajor,
     );
-    cmma::store(
-        s32_sh.as_mut_slice().slice_mut(1024usize, 1280usize),
-        &s4,
-        16u32,
-        cmma::MatrixLayout::RowMajor,
-    );
-    cmma::store(
-        s32_sh.as_mut_slice().slice_mut(1280usize, 1536usize),
-        &s5,
-        16u32,
-        cmma::MatrixLayout::RowMajor,
-    );
-    cmma::store(
-        s32_sh.as_mut_slice().slice_mut(1536usize, 1792usize),
-        &s6,
-        16u32,
-        cmma::MatrixLayout::RowMajor,
-    );
-    cmma::store(
-        s32_sh.as_mut_slice().slice_mut(1792usize, 2048usize),
-        &s7,
-        16u32,
-        cmma::MatrixLayout::RowMajor,
-    );
     sync_cube();
     for i in 0..KD * 16 {
-        sb[(i / 16) * 128 + n0 + (i % 16)] = s32_sh[i];
+        sb[(i / 16) * 64 + n0 + (i % 16)] = s32_sh[i];
     }
 }
