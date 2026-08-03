@@ -1,6 +1,7 @@
+use burn::backend::{Backend, DispatchKindConversion};
 use burn::module::{Initializer, Module, Param};
 use burn::nn::{Linear, LinearConfig};
-use burn::tensor::{backend::Backend, Distribution as TensorDistribution, Tensor};
+use burn::tensor::{Device, DispatchTensor, Distribution as TensorDistribution, Tensor};
 
 use burn::tensor::activation::{sigmoid, silu, softplus};
 
@@ -28,24 +29,24 @@ const FUSED_RECURRENT_MAX_SEQ: usize = 64;
 /// conv with the *current* token instead of the previous ones and drift from
 /// the prefill trajectory.
 #[derive(Debug, Clone)]
-pub struct Gdn2State<B: Backend> {
+pub struct Gdn2State {
     /// Recurrent matrix state `[B, HV, K, V]`.
-    pub recurrent: Tensor<B, 4>,
+    pub recurrent: Tensor<4>,
     /// Short-conv context for q `[B, SHORT_CONV_CACHE, K]`.
-    pub conv_q: Tensor<B, 3>,
+    pub conv_q: Tensor<3>,
     /// Short-conv context for k `[B, SHORT_CONV_CACHE, K]`.
-    pub conv_k: Tensor<B, 3>,
+    pub conv_k: Tensor<3>,
     /// Short-conv context for v `[B, SHORT_CONV_CACHE, V]`.
-    pub conv_v: Tensor<B, 3>,
+    pub conv_v: Tensor<3>,
 }
 
-impl<B: Backend> Gdn2State<B> {
+impl Gdn2State {
     /// Create a zero-initialized state (used as a fresh prefill/decoding state).
     ///
     /// `recurrent` is per-head `[B, HV, head_dim, head_v_dim]`; the conv
     /// caches carry the projected channel dims `[B, SHORT_CONV_CACHE, K/V]`.
     pub fn zeros(
-        device: &B::Device,
+        device: &Device,
         batch: usize,
         hv: usize,
         hk: usize,
@@ -64,7 +65,7 @@ impl<B: Backend> Gdn2State<B> {
 
 /// Updated short-convolution context returned by [`GatedDeltaNet2::project`]:
 /// the last `SHORT_CONV_CACHE` projected values of q, k and v.
-pub type ConvCache<B> = (Tensor<B, 3>, Tensor<B, 3>, Tensor<B, 3>);
+pub type ConvCache = (Tensor<3>, Tensor<3>, Tensor<3>);
 
 /// GDN-2 (Gated DeltaNet 2) token-mixing layer.
 ///
@@ -81,34 +82,35 @@ pub type ConvCache<B> = (Tensor<B, 3>, Tensor<B, 3>, Tensor<B, 3>);
 /// - `FusedRecurrent`: token-by-token scan (inference, state-passing)
 /// - `Chunk`: chunked WY representation (training, cuBLAS-friendly matmuls)
 #[derive(Module, Debug)]
-pub struct GatedDeltaNet2<B: Backend> {
-    pub q_proj: Linear<B>,
-    pub k_proj: Linear<B>,
-    pub v_proj: Linear<B>,
-    pub f_proj_0: Linear<B>,
-    pub f_proj_1: Linear<B>,
-    pub b_proj: Linear<B>,
-    pub w_proj: Linear<B>,
-    pub g_proj_0: Linear<B>,
-    pub g_proj_1: Linear<B>,
-    pub a_log: Param<Tensor<B, 1>>,
-    pub dt_bias: Param<Tensor<B, 1>>,
-    pub o_norm_weight: Param<Tensor<B, 1>>,
-    pub o_proj: Linear<B>,
-    pub q_conv_w: Param<Tensor<B, 2>>,
-    pub k_conv_w: Param<Tensor<B, 2>>,
-    pub v_conv_w: Param<Tensor<B, 2>>,
+pub struct GatedDeltaNet2 {
+    pub q_proj: Linear,
+    pub k_proj: Linear,
+    pub v_proj: Linear,
+    pub f_proj_0: Linear,
+    pub f_proj_1: Linear,
+    pub b_proj: Linear,
+    pub w_proj: Linear,
+    pub g_proj_0: Linear,
+    pub g_proj_1: Linear,
+    pub a_log: Param<Tensor<1>>,
+    pub dt_bias: Param<Tensor<1>>,
+    pub o_norm_weight: Param<Tensor<1>>,
+    pub o_proj: Linear,
+    pub q_conv_w: Param<Tensor<2>>,
+    pub k_conv_w: Param<Tensor<2>>,
+    pub v_conv_w: Param<Tensor<2>>,
+    #[module(skip)]
     pub config: Gdn2Config,
-    pub decay_factors: Option<Param<Tensor<B, 2>>>,
+    pub decay_factors: Option<Param<Tensor<2>>>,
 }
 
-impl<B: Backend> GatedDeltaNet2<B> {
+impl GatedDeltaNet2 {
     /// Create a new GDN-2 layer from a configuration.
     ///
     /// # Panics
     ///
     /// Panics if the configuration is invalid, see [`Gdn2Config::validate`].
-    pub fn new(cfg: &Gdn2Config, device: &B::Device) -> Self {
+    pub fn new(cfg: &Gdn2Config, device: &Device) -> Self {
         cfg.validate();
         let d = cfg.hidden_size;
         let h = cfg.num_heads;
@@ -139,23 +141,20 @@ impl<B: Backend> GatedDeltaNet2<B> {
 
         // Short-conv weights: U(-0.5, 0.5), matching the reference conv init
         // (kaiming_uniform with a=sqrt(5), fan_in = kernel_size = 4).
-        let rand_w = |c: usize| -> Param<Tensor<B, 2>> {
-            let w = Tensor::<B, 2>::random(
-                [c, 4],
-                TensorDistribution::Uniform(-0.5f64, 0.5f64),
-                device,
-            );
+        let rand_w = |c: usize| -> Param<Tensor<2>> {
+            let w =
+                Tensor::<2>::random([c, 4], TensorDistribution::Uniform(-0.5f64, 0.5f64), device);
             Param::from_tensor(w)
         };
 
-        let a_init = Tensor::<B, 1>::random(
+        let a_init = Tensor::<1>::random(
             [h],
             TensorDistribution::Uniform(1.0f64.ln(), 16.0f64.ln()),
             device,
         );
 
         let dt = {
-            let raw = Tensor::<B, 1>::random(
+            let raw = Tensor::<1>::random(
                 [kd],
                 TensorDistribution::Uniform(0.001f64.ln(), 0.1f64.ln()),
                 device,
@@ -196,7 +195,7 @@ impl<B: Backend> GatedDeltaNet2<B> {
     /// Panics if `hidden_states` last dimension does not equal `config.hidden_size`,
     /// or if `state` is provided with mismatched dimensions.
     #[inline]
-    fn validate(&self, hidden_states: &Tensor<B, 3>) {
+    fn validate(&self, hidden_states: &Tensor<3>) {
         let d = hidden_states.shape().dims::<3>()[2];
         assert_eq!(
             d, self.config.hidden_size,
@@ -221,12 +220,15 @@ impl<B: Backend> GatedDeltaNet2<B> {
     /// # Panics
     ///
     /// Panics if `hidden_states` last dimension does not equal `config.hidden_size`.
-    pub fn forward(
+    pub fn forward<B: Backend>(
         &self,
-        hidden_states: Tensor<B, 3>,
-        state: &mut Option<Gdn2State<B>>,
+        hidden_states: Tensor<3>,
+        state: &mut Option<Gdn2State>,
         update_state: bool,
-    ) -> Tensor<B, 3> {
+    ) -> Tensor<3>
+    where
+        DispatchTensor: DispatchKindConversion<B>,
+    {
         self.validate(&hidden_states);
         let [batch, tokens, _] = hidden_states.shape().dims::<3>();
 
@@ -253,7 +255,7 @@ impl<B: Backend> GatedDeltaNet2<B> {
                         .as_ref()
                         .map(|s| s.recurrent.clone())
                         .unwrap_or_else(|| Tensor::zeros([batch, hv, hk, v_head], &device));
-                    let (o, ns) = fused_recurrent_gdn2(
+                    let (o, ns) = fused_recurrent_gdn2::<B>(
                         projected.q,
                         projected.k,
                         projected.v,
@@ -323,7 +325,10 @@ impl<B: Backend> GatedDeltaNet2<B> {
     /// # Panics
     ///
     /// Panics if `hidden_states` last dimension does not equal `config.hidden_size`.
-    pub fn forward_train(&self, hidden_states: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn forward_train<B: Backend>(&self, hidden_states: Tensor<3>) -> Tensor<3>
+    where
+        DispatchTensor: DispatchKindConversion<B>,
+    {
         self.validate(&hidden_states);
         let [batch, tokens, _] = hidden_states.shape().dims::<3>();
         let (projected, _conv_out) = self.project(hidden_states, None);
@@ -337,7 +342,7 @@ impl<B: Backend> GatedDeltaNet2<B> {
 
         let output = match self.config.mode {
             Gdn2Mode::FusedRecurrent => {
-                let (o, _s) = fused_recurrent_gdn2(
+                let (o, _s) = fused_recurrent_gdn2::<B>(
                     projected.q,
                     projected.k,
                     projected.v,
@@ -380,9 +385,9 @@ impl<B: Backend> GatedDeltaNet2<B> {
     /// previous call; returns the updated context as the second element.
     pub fn project(
         &self,
-        hidden_states: Tensor<B, 3>,
-        conv_cache: Option<(&Tensor<B, 3>, &Tensor<B, 3>, &Tensor<B, 3>)>,
-    ) -> (ProjectedInputs<'_, B>, Option<ConvCache<B>>) {
+        hidden_states: Tensor<3>,
+        conv_cache: Option<(&Tensor<3>, &Tensor<3>, &Tensor<3>)>,
+    ) -> (ProjectedInputs<'_>, Option<ConvCache>) {
         let [batch, tokens, _] = hidden_states.shape().dims::<3>();
         let h = self.config.num_heads;
         let hk = self.config.head_dim;
@@ -392,7 +397,7 @@ impl<B: Backend> GatedDeltaNet2<B> {
         let kd = h * hk;
         let use_sc = self.config.use_short_conv;
 
-        let to_4d = |t: Tensor<B, 3>, n: usize, d: usize| -> Tensor<B, 4> {
+        let to_4d = |t: Tensor<3>, n: usize, d: usize| -> Tensor<4> {
             let [b, tt, _] = t.shape().dims::<3>();
             t.reshape([b, tt, n, d]).permute([0, 2, 1, 3])
         };
@@ -456,7 +461,7 @@ impl<B: Backend> GatedDeltaNet2<B> {
         // Repeat key-side tensors for grouped value attention (GVA)
         if hv > h {
             let rep = hv / h;
-            let r = |t: Tensor<B, 4>| -> Tensor<B, 4> {
+            let r = |t: Tensor<4>| -> Tensor<4> {
                 t.unsqueeze_dim::<5>(3)
                     .repeat(&[1, 1, 1, rep, 1])
                     .reshape([batch, hv, tokens, hk])
@@ -498,12 +503,12 @@ impl<B: Backend> GatedDeltaNet2<B> {
 /// Per-head RMS norm with SiLU gate.
 ///
 /// x: `[B, T, HV, V]`, gate: `[B, T, HV, V]`, weight: `[V]`
-pub fn rms_norm_gate_per_head<B: Backend>(
-    x: Tensor<B, 4>,
-    gate: Tensor<B, 4>,
-    weight: Tensor<B, 1>,
+pub fn rms_norm_gate_per_head(
+    x: Tensor<4>,
+    gate: Tensor<4>,
+    weight: Tensor<1>,
     eps: f64,
-) -> Tensor<B, 4> {
+) -> Tensor<4> {
     let v = x.shape().dims::<4>()[3];
     let rms = x
         .clone()
@@ -516,17 +521,17 @@ pub fn rms_norm_gate_per_head<B: Backend>(
     normed * w * silu(gate)
 }
 
-pub struct ProjectedInputs<'a, B: Backend> {
-    pub q: Tensor<B, 4>,
-    pub k: Tensor<B, 4>,
-    pub v: Tensor<B, 4>,
-    pub g: Tensor<B, 4>,
-    pub b: Tensor<B, 4>,
-    pub w: Tensor<B, 4>,
-    pub gate: Tensor<B, 4>,
-    pub o_norm: Tensor<B, 1>,
+pub struct ProjectedInputs<'a> {
+    pub q: Tensor<4>,
+    pub k: Tensor<4>,
+    pub v: Tensor<4>,
+    pub g: Tensor<4>,
+    pub b: Tensor<4>,
+    pub w: Tensor<4>,
+    pub gate: Tensor<4>,
+    pub o_norm: Tensor<1>,
     pub eps: f64,
-    pub o_proj: &'a Linear<B>,
+    pub o_proj: &'a Linear,
     pub hv: usize,
     pub vd: usize,
 }

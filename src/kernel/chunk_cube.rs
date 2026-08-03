@@ -26,23 +26,23 @@ use cubecl::prelude::*;
 #[allow(clippy::manual_div_ceil)] // cubecl can't expand `.div_ceil()` on runtime values
 #[cube(launch_unchecked)]
 fn gdn2_chunk_intra_kernel<F: Float>(
-    q: &Array<F>,         // [BH*NT, C, K]
-    k: &Array<F>,         // [BH*NT, C, K]
-    g: &Array<F>,         // [BH*NT, C, K]
-    b: &Array<F>,         // [BH*NT, C, K]
-    v: &Array<F>,         // [BH*NT, C, V]
-    wg: &Array<F>,        // [BH*NT, C, V]
-    gexp: &mut Array<F>,  // [BH*NT, C, K]  exp(chunk-local cumulative g)
-    kgt: &mut Array<F>,   // [BH*NT, K, C]  k / g_exp, transposed
-    qgt: &mut Array<F>,   // [BH*NT, K, C]  q ⊙ g_exp, transposed
-    bkt: &mut Array<F>,   // [BH*NT, K, C]  b ⊙ k ⊙ g_exp, transposed
-    wvt: &mut Array<F>,   // [BH*NT, V, C]  w_gate ⊙ v, transposed
-    aqk: &mut Array<F>,   // [BH*NT, C, C]  causal, scaled
-    akk: &mut Array<F>,   // [BH*NT, C, C]  strict lower (the T matrix)
-    w: &mut Array<F>,     // [BH*NT, C, K]  pseudo-key  = A @ (b⊙k⊙g_exp)
-    u: &mut Array<F>,     // [BH*NT, C, V]  pseudo-value = A @ (w_gate⊙v)
-    kgd: &mut Array<F>,   // [BH*NT, C, K]  k ⊙ g_exp[last] / g_exp
-    glast: &mut Array<F>, // [BH*NT, K]     g_exp[last row]
+    q: &[F],         // [BH*NT, C, K]
+    k: &[F],         // [BH*NT, C, K]
+    g: &[F],         // [BH*NT, C, K]
+    b: &[F],         // [BH*NT, C, K]
+    v: &[F],         // [BH*NT, C, V]
+    wg: &[F],        // [BH*NT, C, V]
+    gexp: &mut [F],  // [BH*NT, C, K]  exp(chunk-local cumulative g)
+    kgt: &mut [F],   // [BH*NT, K, C]  k / g_exp, transposed
+    qgt: &mut [F],   // [BH*NT, K, C]  q ⊙ g_exp, transposed
+    bkt: &mut [F],   // [BH*NT, K, C]  b ⊙ k ⊙ g_exp, transposed
+    wvt: &mut [F],   // [BH*NT, V, C]  w_gate ⊙ v, transposed
+    aqk: &mut [F],   // [BH*NT, C, C]  causal, scaled
+    akk: &mut [F],   // [BH*NT, C, C]  strict lower (the T matrix)
+    w: &mut [F],     // [BH*NT, C, K]  pseudo-key  = A @ (b⊙k⊙g_exp)
+    u: &mut [F],     // [BH*NT, C, V]  pseudo-value = A @ (w_gate⊙v)
+    kgd: &mut [F],   // [BH*NT, C, K]  k ⊙ g_exp[last] / g_exp
+    glast: &mut [F], // [BH*NT, K]     g_exp[last row]
     scale: f32,
     #[comptime] chunk_c: u32,
     #[comptime] k_dim: u32,
@@ -58,7 +58,7 @@ fn gdn2_chunk_intra_kernel<F: Float>(
     let nthr = CUBE_DIM as usize;
     let gy = nthr / c;
     let kt = (kd + gy - 1) / gy;
-    let mut a_sh = SharedMemory::<F>::new(c * (c + 1));
+    let mut a_sh = Shared::<[F]>::new_slice(c * (c + 1));
     let ac = c + 1; // padded row stride: kills 32-way shared bank conflicts
     let tid = grp * c + r;
     if r < c && stages & 1 != 0 {
@@ -214,7 +214,7 @@ fn gdn2_chunk_intra_kernel<F: Float>(
         // T[row][*]·A[*][r] is split across the 16 `grp` lanes (partial sums in
         // shared, one reduction per row), so all 1024 threads stay busy
         // instead of just grp==0.
-        let mut p_sh = SharedMemory::<F>::new(c * 17); // max 16 grp lanes, padded
+        let mut p_sh = Shared::<[F]>::new_slice(c * 17); // max 16 grp lanes, padded
         let p_stride = gy + 1;
         let mut row = 0;
         while row < c {
@@ -258,12 +258,12 @@ fn gdn2_chunk_intra_kernel<F: Float>(
                 let mut wb = F::new(0.0_f32);
                 let mut s = 0;
                 while s + 1 < c {
-                    wa = wa + a_sh[r * ac + s] * bkt[(block * kd + c_idx) * c + s];
-                    wb = wb + a_sh[r * ac + s + 1] * bkt[(block * kd + c_idx) * c + s + 1];
+                    wa += a_sh[r * ac + s] * bkt[(block * kd + c_idx) * c + s];
+                    wb += a_sh[r * ac + s + 1] * bkt[(block * kd + c_idx) * c + s + 1];
                     s += 2;
                 }
                 while s < c {
-                    wa = wa + a_sh[r * ac + s] * bkt[(block * kd + c_idx) * c + s];
+                    wa += a_sh[r * ac + s] * bkt[(block * kd + c_idx) * c + s];
                     s += 1;
                 }
                 w[block * kd * c + c_idx * c + r] = wa + wb;
@@ -279,12 +279,12 @@ fn gdn2_chunk_intra_kernel<F: Float>(
                 let mut ub = F::new(0.0_f32);
                 let mut s = 0;
                 while s + 1 < c {
-                    ua = ua + a_sh[r * ac + s] * wvt[(block * vd + v_idx) * c + s];
-                    ub = ub + a_sh[r * ac + s + 1] * wvt[(block * vd + v_idx) * c + s + 1];
+                    ua += a_sh[r * ac + s] * wvt[(block * vd + v_idx) * c + s];
+                    ub += a_sh[r * ac + s + 1] * wvt[(block * vd + v_idx) * c + s + 1];
                     s += 2;
                 }
                 while s < c {
-                    ua = ua + a_sh[r * ac + s] * wvt[(block * vd + v_idx) * c + s];
+                    ua += a_sh[r * ac + s] * wvt[(block * vd + v_idx) * c + s];
                     s += 1;
                 }
                 u[block * vd * c + v_idx * c + r] = ua + ub;
@@ -299,14 +299,14 @@ fn gdn2_chunk_intra_kernel<F: Float>(
 /// `v_new` `[C, 16]` live in shared memory. Mutates `state` in place.
 #[cube(launch_unchecked)]
 fn gdn2_chunk_inter_kernel<F: Float>(
-    aqk: &Array<F>,       // [BH*NT, C, C]
-    w: &Array<F>,         // [BH*NT, C, K]
-    u: &Array<F>,         // [BH*NT, C, V]
-    qg: &Array<F>,        // [BH*NT, C, K]
-    kgd: &Array<F>,       // [BH*NT, C, K]
-    glast: &Array<F>,     // [BH*NT, K]
-    state: &mut Array<F>, // [BH, K, V], updated in place
-    out: &mut Array<F>,   // [BH*NT, C, V]
+    aqk: &[F],       // [BH*NT, C, C]
+    w: &[F],         // [BH*NT, C, K]
+    u: &[F],         // [BH*NT, C, V]
+    qg: &[F],        // [BH*NT, C, K]
+    kgd: &[F],       // [BH*NT, C, K]
+    glast: &[F],     // [BH*NT, K]
+    state: &mut [F], // [BH, K, V], updated in place
+    out: &mut [F],   // [BH*NT, C, V]
     scale: f32,
     nt: u32,
     #[comptime] chunk_c: u32,
@@ -330,10 +330,10 @@ fn gdn2_chunk_inter_kernel<F: Float>(
     // outweighs the latency hiding, so read directly from global.
     let pf = comptime![k_dim <= 64];
     if r < c {
-        let mut s_sh = SharedMemory::<F>::new(kd * vtile);
-        let mut vn_sh = SharedMemory::<F>::new(c * vtile);
-        let mut w_sh = SharedMemory::<F>::new(if pf { kd * c } else { 0 });
-        let mut kgd_sh = SharedMemory::<F>::new(if pf { kd * c } else { 0 });
+        let mut s_sh = Shared::<[F]>::new_slice(kd * vtile);
+        let mut vn_sh = Shared::<[F]>::new_slice(c * vtile);
+        let mut w_sh = Shared::<[F]>::new_slice(if pf { kd * c } else { 0 });
+        let mut kgd_sh = Shared::<[F]>::new_slice(if pf { kd * c } else { 0 });
         let nthr = CUBE_DIM as usize;
         let tid = grp * c + r;
 
@@ -548,10 +548,10 @@ fn gdn2_chunk_inter_kernel<F: Float>(
                             } else {
                                 kgd[cbase * kd + (r2 + 3) * kd + kk]
                             };
-                            acc_a = acc_a + g0 * vn_sh[r2 * vtile + grp * n_vp + jj];
-                            acc_b = acc_b + g1 * vn_sh[(r2 + 1) * vtile + grp * n_vp + jj];
-                            acc_c = acc_c + g2 * vn_sh[(r2 + 2) * vtile + grp * n_vp + jj];
-                            acc_d = acc_d + g3 * vn_sh[(r2 + 3) * vtile + grp * n_vp + jj];
+                            acc_a += g0 * vn_sh[r2 * vtile + grp * n_vp + jj];
+                            acc_b += g1 * vn_sh[(r2 + 1) * vtile + grp * n_vp + jj];
+                            acc_c += g2 * vn_sh[(r2 + 2) * vtile + grp * n_vp + jj];
+                            acc_d += g3 * vn_sh[(r2 + 3) * vtile + grp * n_vp + jj];
                             r2 += 4;
                         }
                         while r2 < c {
@@ -560,7 +560,7 @@ fn gdn2_chunk_inter_kernel<F: Float>(
                             } else {
                                 kgd[cbase * kd + r2 * kd + kk]
                             };
-                            acc_a = acc_a + g0 * vn_sh[r2 * vtile + grp * n_vp + jj];
+                            acc_a += g0 * vn_sh[r2 * vtile + grp * n_vp + jj];
                             r2 += 1;
                         }
                         if stages & 4 != 0 {
@@ -612,13 +612,14 @@ fn gdn2_chunk_inter_kernel<F: Float>(
 #[cfg(feature = "cuda")]
 pub mod cuda {
     use super::*;
-    use burn::tensor::{backend::Backend, Tensor};
+    use burn::backend::{Backend, DispatchKindConversion};
+    use burn::tensor::{DispatchTensor, Tensor};
     use burn_cubecl::tensor::CubeTensor;
     use burn_cubecl::CubeBackend;
     use std::any::{Any, TypeId};
 
     /// The bare (non-fusion) CUDA backend the fused kernels target.
-    pub type CudaBare = CubeBackend<cubecl::cuda::CudaRuntime, f32, i32, u8>;
+    pub type CudaBare = CubeBackend<cubecl::cuda::CudaRuntime>;
 
     fn is_cuda<B: Backend>() -> bool {
         TypeId::of::<B>() == TypeId::of::<CudaBare>()
@@ -627,15 +628,18 @@ pub mod cuda {
     /// Owned copy of the underlying `CubeTensor` of `t`, if `B` is the bare
     /// CUDA `CubeBackend` and the buffer is row-major contiguous.
     fn cube_of<B: Backend, const D: usize>(
-        t: &Tensor<B, D>,
-    ) -> Option<CubeTensor<cubecl::cuda::CudaRuntime>> {
+        t: &Tensor<D>,
+    ) -> Option<CubeTensor<cubecl::cuda::CudaRuntime>>
+    where
+        DispatchTensor: DispatchKindConversion<B>,
+    {
         if !is_cuda::<B>() {
             return None;
         }
-        let prim = t.clone().into_primitive().tensor();
+        let prim = t.clone().try_into_primitive::<B>().ok()?;
         let cube = (&prim as &dyn Any).downcast_ref::<CubeTensor<cubecl::cuda::CudaRuntime>>()?;
         let shape = cube.meta.shape().dims::<D>();
-        let strides = cube.meta.strides();
+        let strides = cube.meta.strides().to_vec();
         let mut expected = 1usize;
         for i in (0..D).rev() {
             if shape[i] > 1 && strides[i] != expected {
@@ -643,7 +647,7 @@ pub mod cuda {
                 // permute). burn 0.21 has no `contiguous()`; an elementwise op
                 // materializes the same data into a fresh contiguous buffer.
                 let contig = t.clone().mul_scalar(1.0);
-                return cube_of(&contig);
+                return cube_of::<B, D>(&contig);
             }
             expected *= shape[i];
         }
@@ -656,16 +660,19 @@ pub mod cuda {
     /// the caller then falls back to the tensor-ops path.
     #[allow(clippy::too_many_arguments)]
     pub fn fused_chunk_forward<B: Backend>(
-        q: Tensor<B, 4>,
-        k: Tensor<B, 4>,
-        v: Tensor<B, 4>,
-        g: Tensor<B, 4>,
-        b: Tensor<B, 4>,
-        w: Tensor<B, 4>,
-        state: Tensor<B, 4>,
+        q: Tensor<4>,
+        k: Tensor<4>,
+        v: Tensor<4>,
+        g: Tensor<4>,
+        b: Tensor<4>,
+        w: Tensor<4>,
+        state: Tensor<4>,
         scale: f64,
         chunk_size: usize,
-    ) -> Option<(Tensor<B, 4>, Tensor<B, 4>)> {
+    ) -> Option<(Tensor<4>, Tensor<4>)>
+    where
+        DispatchTensor: DispatchKindConversion<B>,
+    {
         let [batch, heads, time, k_dim] = q.shape().dims::<4>();
         let v_dim = v.shape().dims::<4>()[3];
         let c = chunk_size;
@@ -679,18 +686,18 @@ pub mod cuda {
         let bh = batch * heads;
         let device = state.device();
 
-        let q = cube_of(&q)?;
-        let k = cube_of(&k)?;
-        let v = cube_of(&v)?;
-        let g = cube_of(&g)?;
-        let b = cube_of(&b)?;
-        let w = cube_of(&w)?;
-        let state_cube = cube_of(&state)?;
+        let q = cube_of::<B, 4>(&q)?;
+        let k = cube_of::<B, 4>(&k)?;
+        let v = cube_of::<B, 4>(&v)?;
+        let g = cube_of::<B, 4>(&g)?;
+        let b = cube_of::<B, 4>(&b)?;
+        let w = cube_of::<B, 4>(&w)?;
+        let state_cube = cube_of::<B, 4>(&state)?;
 
         let nblk = bh * nt;
         let client = state_cube.client.clone();
 
-        let mk = |shape: [usize; 3]| -> Tensor<B, 3> { Tensor::<B, 3>::empty(shape, &device) };
+        let mk = |shape: [usize; 3]| -> Tensor<3> { Tensor::<3>::empty(shape, &device) };
         let gexp = mk([nblk, c, k_dim]);
         let kgt = mk([nblk, k_dim, c]);
         let qgt = mk([nblk, k_dim, c]);
@@ -701,21 +708,21 @@ pub mod cuda {
         let u_blk = mk([nblk, c, v_dim]);
         let kgd = mk([nblk, c, k_dim]);
         let wvt = mk([nblk, v_dim, c]);
-        let glast = Tensor::<B, 2>::empty([nblk, k_dim], &device);
-        let out = Tensor::<B, 4>::empty([batch, heads, time, v_dim], &device);
+        let glast = Tensor::<2>::empty([nblk, k_dim], &device);
+        let out = Tensor::<4>::empty([batch, heads, time, v_dim], &device);
 
-        let gexp_c = cube_of(&gexp).expect("backend mismatch");
-        let kgt_c = cube_of(&kgt).expect("backend mismatch");
-        let qgt_c = cube_of(&qgt).expect("backend mismatch");
-        let bkt_c = cube_of(&bkt).expect("backend mismatch");
-        let aqk_c = cube_of(&aqk).expect("backend mismatch");
-        let akk_c = cube_of(&akk).expect("backend mismatch");
-        let w_c = cube_of(&w_blk).expect("backend mismatch");
-        let u_c = cube_of(&u_blk).expect("backend mismatch");
-        let kgd_c = cube_of(&kgd).expect("backend mismatch");
-        let wvt_c = cube_of(&wvt).expect("backend mismatch");
-        let glast_c = cube_of(&glast).expect("backend mismatch");
-        let out_c = cube_of(&out).expect("backend mismatch");
+        let gexp_c = cube_of::<B, 3>(&gexp).expect("backend mismatch");
+        let kgt_c = cube_of::<B, 3>(&kgt).expect("backend mismatch");
+        let qgt_c = cube_of::<B, 3>(&qgt).expect("backend mismatch");
+        let bkt_c = cube_of::<B, 3>(&bkt).expect("backend mismatch");
+        let aqk_c = cube_of::<B, 3>(&aqk).expect("backend mismatch");
+        let akk_c = cube_of::<B, 3>(&akk).expect("backend mismatch");
+        let w_c = cube_of::<B, 3>(&w_blk).expect("backend mismatch");
+        let u_c = cube_of::<B, 3>(&u_blk).expect("backend mismatch");
+        let kgd_c = cube_of::<B, 3>(&kgd).expect("backend mismatch");
+        let wvt_c = cube_of::<B, 3>(&wvt).expect("backend mismatch");
+        let glast_c = cube_of::<B, 2>(&glast).expect("backend mismatch");
+        let out_c = cube_of::<B, 4>(&out).expect("backend mismatch");
 
         let nk = nblk * c * k_dim;
         let nv = nblk * c * v_dim;
@@ -737,23 +744,23 @@ pub mod cuda {
                 &client,
                 cube_count,
                 cube_dim,
-                ArrayArg::from_raw_parts(q.handle, nk),
-                ArrayArg::from_raw_parts(k.handle, nk),
-                ArrayArg::from_raw_parts(g.handle, nk),
-                ArrayArg::from_raw_parts(b.handle, nk),
-                ArrayArg::from_raw_parts(v.handle, nv),
-                ArrayArg::from_raw_parts(w.handle, nv),
-                ArrayArg::from_raw_parts(gexp_c.handle, nk),
-                ArrayArg::from_raw_parts(kgt_c.handle, nk),
-                ArrayArg::from_raw_parts(qgt_c.handle.clone(), nk),
-                ArrayArg::from_raw_parts(bkt_c.handle, nk),
-                ArrayArg::from_raw_parts(wvt_c.handle, nv),
-                ArrayArg::from_raw_parts(aqk_c.handle.clone(), ncc),
-                ArrayArg::from_raw_parts(akk_c.handle, ncc),
-                ArrayArg::from_raw_parts(w_c.handle.clone(), nk),
-                ArrayArg::from_raw_parts(u_c.handle.clone(), nv),
-                ArrayArg::from_raw_parts(kgd_c.handle.clone(), nk),
-                ArrayArg::from_raw_parts(glast_c.handle.clone(), nblk * k_dim),
+                BufferArg::from_raw_parts(q.handle, nk),
+                BufferArg::from_raw_parts(k.handle, nk),
+                BufferArg::from_raw_parts(g.handle, nk),
+                BufferArg::from_raw_parts(b.handle, nk),
+                BufferArg::from_raw_parts(v.handle, nv),
+                BufferArg::from_raw_parts(w.handle, nv),
+                BufferArg::from_raw_parts(gexp_c.handle, nk),
+                BufferArg::from_raw_parts(kgt_c.handle, nk),
+                BufferArg::from_raw_parts(qgt_c.handle.clone(), nk),
+                BufferArg::from_raw_parts(bkt_c.handle, nk),
+                BufferArg::from_raw_parts(wvt_c.handle, nv),
+                BufferArg::from_raw_parts(aqk_c.handle.clone(), ncc),
+                BufferArg::from_raw_parts(akk_c.handle, ncc),
+                BufferArg::from_raw_parts(w_c.handle.clone(), nk),
+                BufferArg::from_raw_parts(u_c.handle.clone(), nv),
+                BufferArg::from_raw_parts(kgd_c.handle.clone(), nk),
+                BufferArg::from_raw_parts(glast_c.handle.clone(), nblk * k_dim),
                 scale as f32,
                 c as u32,
                 k_dim as u32,
@@ -774,14 +781,14 @@ pub mod cuda {
                 &client,
                 cube_count2,
                 cube_dim2,
-                ArrayArg::from_raw_parts(aqk_c.handle.clone(), ncc),
-                ArrayArg::from_raw_parts(w_c.handle.clone(), nk),
-                ArrayArg::from_raw_parts(u_c.handle.clone(), nv),
-                ArrayArg::from_raw_parts(qgt_c.handle.clone(), nk),
-                ArrayArg::from_raw_parts(kgd_c.handle.clone(), nk),
-                ArrayArg::from_raw_parts(glast_c.handle.clone(), nblk * k_dim),
-                ArrayArg::from_raw_parts(state_cube.handle, bh * k_dim * v_dim),
-                ArrayArg::from_raw_parts(out_c.handle, bh * time * v_dim),
+                BufferArg::from_raw_parts(aqk_c.handle.clone(), ncc),
+                BufferArg::from_raw_parts(w_c.handle.clone(), nk),
+                BufferArg::from_raw_parts(u_c.handle.clone(), nv),
+                BufferArg::from_raw_parts(qgt_c.handle.clone(), nk),
+                BufferArg::from_raw_parts(kgd_c.handle.clone(), nk),
+                BufferArg::from_raw_parts(glast_c.handle.clone(), nblk * k_dim),
+                BufferArg::from_raw_parts(state_cube.handle, bh * k_dim * v_dim),
+                BufferArg::from_raw_parts(out_c.handle, bh * time * v_dim),
                 scale as f32,
                 nt as u32,
                 c as u32,
@@ -799,14 +806,14 @@ pub mod cuda {
     /// `vtile` must equal `y_dim * 2` (the kernel's `n_vp`).
     #[allow(clippy::too_many_arguments)]
     pub fn inter_launch_raw<B: Backend>(
-        aqk: Tensor<B, 3>,
-        w: Tensor<B, 3>,
-        u: Tensor<B, 3>,
-        qgt: Tensor<B, 3>,
-        kgd: Tensor<B, 3>,
-        glast: Tensor<B, 2>,
-        state: Tensor<B, 4>,
-        out: Tensor<B, 4>,
+        aqk: Tensor<3>,
+        w: Tensor<3>,
+        u: Tensor<3>,
+        qgt: Tensor<3>,
+        kgd: Tensor<3>,
+        glast: Tensor<2>,
+        state: Tensor<4>,
+        out: Tensor<4>,
         scale: f64,
         chunk_size: usize,
         nt: usize,
@@ -814,19 +821,22 @@ pub mod cuda {
         vtile: usize,
         y_dim: usize,
         stages: u32,
-    ) -> Tensor<B, 4> {
+    ) -> Tensor<4>
+    where
+        DispatchTensor: DispatchKindConversion<B>,
+    {
         let k_dim = w.shape().dims::<3>()[2];
         let v_dim = u.shape().dims::<3>()[2];
         let c = chunk_size;
         let _device = state.device();
-        let aqk_c = cube_of(&aqk).expect("backend mismatch");
-        let w_c = cube_of(&w).expect("backend mismatch");
-        let u_c = cube_of(&u).expect("backend mismatch");
-        let qgt_c = cube_of(&qgt).expect("backend mismatch");
-        let kgd_c = cube_of(&kgd).expect("backend mismatch");
-        let glast_c = cube_of(&glast).expect("backend mismatch");
-        let state_cube = cube_of(&state).expect("backend mismatch");
-        let out_c = cube_of(&out).expect("backend mismatch");
+        let aqk_c = cube_of::<B, 3>(&aqk).expect("backend mismatch");
+        let w_c = cube_of::<B, 3>(&w).expect("backend mismatch");
+        let u_c = cube_of::<B, 3>(&u).expect("backend mismatch");
+        let qgt_c = cube_of::<B, 3>(&qgt).expect("backend mismatch");
+        let kgd_c = cube_of::<B, 3>(&kgd).expect("backend mismatch");
+        let glast_c = cube_of::<B, 2>(&glast).expect("backend mismatch");
+        let state_cube = cube_of::<B, 4>(&state).expect("backend mismatch");
+        let out_c = cube_of::<B, 4>(&out).expect("backend mismatch");
         let nblk = bh * nt;
         let client = state_cube.client.clone();
         let nk = nblk * c * k_dim;
@@ -844,14 +854,14 @@ pub mod cuda {
                 &client,
                 cube_count2,
                 cube_dim2,
-                ArrayArg::from_raw_parts(aqk_c.handle, ncc),
-                ArrayArg::from_raw_parts(w_c.handle, nk),
-                ArrayArg::from_raw_parts(u_c.handle, nv),
-                ArrayArg::from_raw_parts(qgt_c.handle, nk),
-                ArrayArg::from_raw_parts(kgd_c.handle, nk),
-                ArrayArg::from_raw_parts(glast_c.handle, nblk * k_dim),
-                ArrayArg::from_raw_parts(state_cube.handle, bh * k_dim * v_dim),
-                ArrayArg::from_raw_parts(out_c.handle, bh * nt * c * v_dim),
+                BufferArg::from_raw_parts(aqk_c.handle, ncc),
+                BufferArg::from_raw_parts(w_c.handle, nk),
+                BufferArg::from_raw_parts(u_c.handle, nv),
+                BufferArg::from_raw_parts(qgt_c.handle, nk),
+                BufferArg::from_raw_parts(kgd_c.handle, nk),
+                BufferArg::from_raw_parts(glast_c.handle, nblk * k_dim),
+                BufferArg::from_raw_parts(state_cube.handle, bh * k_dim * v_dim),
+                BufferArg::from_raw_parts(out_c.handle, bh * nt * c * v_dim),
                 scale as f32,
                 nt as u32,
                 c as u32,
@@ -866,47 +876,50 @@ pub mod cuda {
 
     /// Intermediate buffers produced by the intra kernel and consumed by the
     /// inter kernel (diagnostics).
-    pub struct IntraOut<B: Backend> {
-        pub aqk: Tensor<B, 3>,
-        pub w: Tensor<B, 3>,
-        pub u: Tensor<B, 3>,
-        pub kgd: Tensor<B, 3>,
-        pub glast: Tensor<B, 2>,
-        pub wvt: Tensor<B, 3>,
-        pub out: Tensor<B, 4>,
+    pub struct IntraOut {
+        pub aqk: Tensor<3>,
+        pub w: Tensor<3>,
+        pub u: Tensor<3>,
+        pub kgd: Tensor<3>,
+        pub glast: Tensor<2>,
+        pub wvt: Tensor<3>,
+        pub out: Tensor<4>,
     }
 
     /// Intra kernel only, with a comptime phase mask (diagnostics).
     #[allow(clippy::too_many_arguments)]
     pub fn intra_launch_raw<B: Backend>(
-        q: Tensor<B, 4>,
-        k: Tensor<B, 4>,
-        v: Tensor<B, 4>,
-        g: Tensor<B, 4>,
-        b: Tensor<B, 4>,
-        w: Tensor<B, 4>,
-        state: Tensor<B, 4>,
+        q: Tensor<4>,
+        k: Tensor<4>,
+        v: Tensor<4>,
+        g: Tensor<4>,
+        b: Tensor<4>,
+        w: Tensor<4>,
+        state: Tensor<4>,
         scale: f64,
         chunk_size: usize,
         stages: u32,
         y_dim: usize,
-    ) -> IntraOut<B> {
+    ) -> IntraOut
+    where
+        DispatchTensor: DispatchKindConversion<B>,
+    {
         let [batch, heads, time, k_dim] = q.shape().dims::<4>();
         let v_dim = v.shape().dims::<4>()[3];
         let c = chunk_size;
         let nt = time / c;
         let bh = batch * heads;
         let device = state.device();
-        let q = cube_of(&q).expect("backend mismatch");
-        let k = cube_of(&k).expect("backend mismatch");
-        let v = cube_of(&v).expect("backend mismatch");
-        let g = cube_of(&g).expect("backend mismatch");
-        let b = cube_of(&b).expect("backend mismatch");
-        let w = cube_of(&w).expect("backend mismatch");
-        let state_cube = cube_of(&state).expect("backend mismatch");
+        let q = cube_of::<B, 4>(&q).expect("backend mismatch");
+        let k = cube_of::<B, 4>(&k).expect("backend mismatch");
+        let v = cube_of::<B, 4>(&v).expect("backend mismatch");
+        let g = cube_of::<B, 4>(&g).expect("backend mismatch");
+        let b = cube_of::<B, 4>(&b).expect("backend mismatch");
+        let w = cube_of::<B, 4>(&w).expect("backend mismatch");
+        let state_cube = cube_of::<B, 4>(&state).expect("backend mismatch");
         let nblk = bh * nt;
         let client = state_cube.client.clone();
-        let mk = |shape: [usize; 3]| -> Tensor<B, 3> { Tensor::<B, 3>::empty(shape, &device) };
+        let mk = |shape: [usize; 3]| -> Tensor<3> { Tensor::<3>::empty(shape, &device) };
         let gexp = mk([nblk, c, k_dim]);
         let kgt = mk([nblk, k_dim, c]);
         let qgt = mk([nblk, k_dim, c]);
@@ -917,20 +930,20 @@ pub mod cuda {
         let u_blk = mk([nblk, c, v_dim]);
         let kgd = mk([nblk, c, k_dim]);
         let wvt = mk([nblk, v_dim, c]);
-        let glast = Tensor::<B, 2>::empty([nblk, k_dim], &device);
-        let out = Tensor::<B, 4>::empty([batch, heads, time, v_dim], &device);
-        let gexp_c = cube_of(&gexp).expect("backend mismatch");
-        let kgt_c = cube_of(&kgt).expect("backend mismatch");
-        let qgt_c = cube_of(&qgt).expect("backend mismatch");
-        let bkt_c = cube_of(&bkt).expect("backend mismatch");
-        let aqk_c = cube_of(&aqk).expect("backend mismatch");
-        let akk_c = cube_of(&akk).expect("backend mismatch");
-        let w_c = cube_of(&w_blk).expect("backend mismatch");
-        let u_c = cube_of(&u_blk).expect("backend mismatch");
-        let kgd_c = cube_of(&kgd).expect("backend mismatch");
-        let wvt_c = cube_of(&wvt).expect("backend mismatch");
-        let glast_c = cube_of(&glast).expect("backend mismatch");
-        let _out_c = cube_of(&out).expect("backend mismatch");
+        let glast = Tensor::<2>::empty([nblk, k_dim], &device);
+        let out = Tensor::<4>::empty([batch, heads, time, v_dim], &device);
+        let gexp_c = cube_of::<B, 3>(&gexp).expect("backend mismatch");
+        let kgt_c = cube_of::<B, 3>(&kgt).expect("backend mismatch");
+        let qgt_c = cube_of::<B, 3>(&qgt).expect("backend mismatch");
+        let bkt_c = cube_of::<B, 3>(&bkt).expect("backend mismatch");
+        let aqk_c = cube_of::<B, 3>(&aqk).expect("backend mismatch");
+        let akk_c = cube_of::<B, 3>(&akk).expect("backend mismatch");
+        let w_c = cube_of::<B, 3>(&w_blk).expect("backend mismatch");
+        let u_c = cube_of::<B, 3>(&u_blk).expect("backend mismatch");
+        let kgd_c = cube_of::<B, 3>(&kgd).expect("backend mismatch");
+        let wvt_c = cube_of::<B, 3>(&wvt).expect("backend mismatch");
+        let glast_c = cube_of::<B, 2>(&glast).expect("backend mismatch");
+        let _out_c = cube_of::<B, 4>(&out).expect("backend mismatch");
         let nk = nblk * c * k_dim;
         let nv = nblk * c * v_dim;
         let ncc = nblk * c * c;
@@ -945,23 +958,23 @@ pub mod cuda {
                 &client,
                 cube_count,
                 cube_dim,
-                ArrayArg::from_raw_parts(q.handle, nk),
-                ArrayArg::from_raw_parts(k.handle, nk),
-                ArrayArg::from_raw_parts(g.handle, nk),
-                ArrayArg::from_raw_parts(b.handle, nk),
-                ArrayArg::from_raw_parts(v.handle, nv),
-                ArrayArg::from_raw_parts(w.handle, nv),
-                ArrayArg::from_raw_parts(gexp_c.handle, nk),
-                ArrayArg::from_raw_parts(kgt_c.handle, nk),
-                ArrayArg::from_raw_parts(qgt_c.handle.clone(), nk),
-                ArrayArg::from_raw_parts(bkt_c.handle, nk),
-                ArrayArg::from_raw_parts(wvt_c.handle, nv),
-                ArrayArg::from_raw_parts(aqk_c.handle.clone(), ncc),
-                ArrayArg::from_raw_parts(akk_c.handle, ncc),
-                ArrayArg::from_raw_parts(w_c.handle.clone(), nk),
-                ArrayArg::from_raw_parts(u_c.handle.clone(), nv),
-                ArrayArg::from_raw_parts(kgd_c.handle.clone(), nk),
-                ArrayArg::from_raw_parts(glast_c.handle.clone(), nblk * k_dim),
+                BufferArg::from_raw_parts(q.handle, nk),
+                BufferArg::from_raw_parts(k.handle, nk),
+                BufferArg::from_raw_parts(g.handle, nk),
+                BufferArg::from_raw_parts(b.handle, nk),
+                BufferArg::from_raw_parts(v.handle, nv),
+                BufferArg::from_raw_parts(w.handle, nv),
+                BufferArg::from_raw_parts(gexp_c.handle, nk),
+                BufferArg::from_raw_parts(kgt_c.handle, nk),
+                BufferArg::from_raw_parts(qgt_c.handle.clone(), nk),
+                BufferArg::from_raw_parts(bkt_c.handle, nk),
+                BufferArg::from_raw_parts(wvt_c.handle, nv),
+                BufferArg::from_raw_parts(aqk_c.handle.clone(), ncc),
+                BufferArg::from_raw_parts(akk_c.handle, ncc),
+                BufferArg::from_raw_parts(w_c.handle.clone(), nk),
+                BufferArg::from_raw_parts(u_c.handle.clone(), nv),
+                BufferArg::from_raw_parts(kgd_c.handle.clone(), nk),
+                BufferArg::from_raw_parts(glast_c.handle.clone(), nblk * k_dim),
                 scale as f32,
                 c as u32,
                 k_dim as u32,

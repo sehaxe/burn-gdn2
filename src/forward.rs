@@ -1,6 +1,6 @@
-use burn::tensor::{backend::Backend, Tensor};
+use burn::tensor::{Device, Tensor};
 
-fn tril_matrix<B: Backend>(t: usize, device: &B::Device) -> Tensor<B, 4> {
+fn tril_matrix(t: usize, device: &Device) -> Tensor<4> {
     let n = t * t;
     let mut d = vec![0.0f32; n];
     for i in 0..t {
@@ -8,12 +8,12 @@ fn tril_matrix<B: Backend>(t: usize, device: &B::Device) -> Tensor<B, 4> {
             d[i * t + j] = 1.0;
         }
     }
-    Tensor::<B, 1>::from_floats(d.as_slice(), device)
+    Tensor::<1>::from_floats(d.as_slice(), device)
         .reshape([t, t])
         .unsqueeze_dims(&[0, 0])
 }
 
-fn chunk_masks<B: Backend>(c: usize, device: &B::Device) -> (Tensor<B, 4>, Tensor<B, 4>) {
+fn chunk_masks(c: usize, device: &Device) -> (Tensor<4>, Tensor<4>) {
     let n = c * c;
     let mut causal = vec![0.0f32; n];
     let mut strict = vec![0.0f32; n];
@@ -26,23 +26,23 @@ fn chunk_masks<B: Backend>(c: usize, device: &B::Device) -> (Tensor<B, 4>, Tenso
         }
     }
     (
-        Tensor::<B, 1>::from_floats(causal.as_slice(), device).reshape([1, 1, c, c]),
-        Tensor::<B, 1>::from_floats(strict.as_slice(), device).reshape([1, 1, c, c]),
+        Tensor::<1>::from_floats(causal.as_slice(), device).reshape([1, 1, c, c]),
+        Tensor::<1>::from_floats(strict.as_slice(), device).reshape([1, 1, c, c]),
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn chunk_wy_forward<B: Backend>(
-    q: Tensor<B, 4>,
-    k: Tensor<B, 4>,
-    v: Tensor<B, 4>,
-    g: Tensor<B, 4>,
-    b: Tensor<B, 4>,
-    w_gate: Tensor<B, 4>,
-    mut state: Tensor<B, 4>,
+pub fn chunk_wy_forward(
+    q: Tensor<4>,
+    k: Tensor<4>,
+    v: Tensor<4>,
+    g: Tensor<4>,
+    b: Tensor<4>,
+    w_gate: Tensor<4>,
+    mut state: Tensor<4>,
     scale: f64,
     chunk_size: usize,
-) -> (Tensor<B, 4>, Tensor<B, 4>) {
+) -> (Tensor<4>, Tensor<4>) {
     let [batch, heads, time, k_dim] = q.shape().dims::<4>();
     let v_dim = v.shape().dims::<4>()[3];
     let device = q.device();

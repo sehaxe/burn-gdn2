@@ -7,10 +7,9 @@
 //!
 //! ```rust
 //! use burn_gdn2::{Gdn2Config, Gdn2Mode, GatedDeltaNet2};
-//! use burn_tensor::{Distribution, Tensor};
+//! use burn::tensor::{Device, Distribution, Tensor};
 //!
-//! type B = burn_ndarray::NdArray;
-//! let device = Default::default();
+//! let device = Device::ndarray();
 //! let config = Gdn2Config {
 //!     hidden_size: 64,
 //!     num_heads: 2,
@@ -18,25 +17,25 @@
 //!     mode: Gdn2Mode::Chunk,
 //!     ..Default::default()
 //! };
-//! let model = GatedDeltaNet2::<B>::new(&config, &device);
+//! let model = GatedDeltaNet2::new(&config, &device);
 //!
 //! // Training: chunked WY forward over the full sequence.
-//! let x = Tensor::<B, 3>::random(
+//! let x = Tensor::<3>::random(
 //!     [1, 32, 64],
 //!     Distribution::Normal(0.0, 1.0),
 //!     &device,
 //! );
-//! let output = model.forward_train(x);
+//! let output = model.forward_train::<burn::backend::NdArray>(x);
 //! assert_eq!(output.shape().dims(), [1, 32, 64]);
 //!
 //! // Inference: token-by-token with persistent state.
 //! let mut state = None;
-//! let token = Tensor::<B, 3>::random(
+//! let token = Tensor::<3>::random(
 //!     [1, 1, 64],
 //!     Distribution::Normal(0.0, 1.0),
 //!     &device,
 //! );
-//! let output = model.forward(token, &mut state, true);
+//! let output = model.forward::<burn::backend::NdArray>(token, &mut state, true);
 //! assert_eq!(output.shape().dims(), [1, 1, 64]);
 //! ```
 //!

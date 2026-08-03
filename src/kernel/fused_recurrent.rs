@@ -1,4 +1,5 @@
-use burn::tensor::{backend::Backend, Tensor};
+use burn::backend::{Backend, DispatchKindConversion};
+use burn::tensor::{DispatchTensor, Tensor};
 
 /// Fused recurrent forward - token-by-token scan.
 ///
@@ -8,16 +9,16 @@ use burn::tensor::{backend::Backend, Tensor};
 ///   S ← S + k_t @ v_new^T                        - rank-1 state update
 ///   o_t ← q_t^T @ S * scale                      - output read
 #[allow(clippy::too_many_arguments)]
-pub fn fused_recurrent_forward<B: Backend>(
-    q: Tensor<B, 4>,
-    k: Tensor<B, 4>,
-    v: Tensor<B, 4>,
-    g: Tensor<B, 4>,
-    b: Tensor<B, 4>,
-    w: Tensor<B, 4>,
-    mut state: Tensor<B, 4>,
+pub fn fused_recurrent_forward(
+    q: Tensor<4>,
+    k: Tensor<4>,
+    v: Tensor<4>,
+    g: Tensor<4>,
+    b: Tensor<4>,
+    w: Tensor<4>,
+    mut state: Tensor<4>,
     scale: f64,
-) -> (Tensor<B, 4>, Tensor<B, 4>) {
+) -> (Tensor<4>, Tensor<4>) {
     let time = q.shape().dims::<4>()[2];
     let mut outputs = Vec::with_capacity(time);
 
@@ -63,16 +64,19 @@ pub fn fused_recurrent_forward<B: Backend>(
 /// executed by one fused cubecl kernel instead of ~8 tensor ops.
 #[allow(clippy::too_many_arguments)]
 pub fn fused_recurrent_gdn2<B: Backend>(
-    q: Tensor<B, 4>,
-    k: Tensor<B, 4>,
-    v: Tensor<B, 4>,
-    g: Tensor<B, 4>,
-    b: Tensor<B, 4>,
-    w: Tensor<B, 4>,
-    state: Option<Tensor<B, 4>>,
+    q: Tensor<4>,
+    k: Tensor<4>,
+    v: Tensor<4>,
+    g: Tensor<4>,
+    b: Tensor<4>,
+    w: Tensor<4>,
+    state: Option<Tensor<4>>,
     scale: f64,
     update_state: bool,
-) -> (Tensor<B, 4>, Option<Tensor<B, 4>>) {
+) -> (Tensor<4>, Option<Tensor<4>>)
+where
+    DispatchTensor: DispatchKindConversion<B>,
+{
     let [batch, hv, _time, _] = q.shape().dims::<4>();
     let [_, _, _, k_dim] = k.shape().dims::<4>();
     let v_dim = v.shape().dims::<4>()[3];

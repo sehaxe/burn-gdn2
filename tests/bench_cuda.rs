@@ -9,12 +9,13 @@
 //! Run: cargo test --release --features cuda -p burn-gdn2 --test bench_cuda -- --ignored --nocapture
 
 #[cfg(feature = "cuda")]
+use burn::backend::NdArray;
+#[cfg(feature = "cuda")]
 use burn::module::Module;
 #[cfg(feature = "cuda")]
 use burn::tensor::{Distribution, Tensor};
 #[cfg(feature = "cuda")]
 use burn_cuda::Cuda;
-#[cfg(feature = "cuda")]
 use burn_gdn2::forward::chunk_wy_forward;
 #[cfg(feature = "cuda")]
 use burn_gdn2::kernel::fused_recurrent_cube::cuda::fused_step;
@@ -92,8 +93,8 @@ fn bench_cuda() {
 
     for &(name, hs, nh, hk, ev, nvh, _cs, B, Sq, Sk) in CFGS {
         let c = cfg(hs, nh, hk, ev, nvh, 64);
-        let m = GatedDeltaNet2::<B>::new(&c, &dev);
-        let x = Tensor::<B, 3>::random([B, Sk, hs], Distribution::Normal(0.0, 1.0), &dev);
+        let m = GatedDeltaNet2::new(&c, &dev);
+        let x = Tensor::<3>::random([B, Sk, hs], Distribution::Normal(0.0, 1.0), &dev);
 
         let proj_time = time_it(50, {
             let m = m.clone();
@@ -116,15 +117,15 @@ fn bench_cuda() {
             continue;
         }
         let c = cfg(hs, nh, hk, ev, nvh, cs);
-        let m = GatedDeltaNet2::<B>::new(&c, &dev);
-        let x = Tensor::<B, 3>::random([B, Sk, hs], Distribution::Normal(0.0, 1.0), &dev);
+        let m = GatedDeltaNet2::new(&c, &dev);
+        let x = Tensor::<3>::random([B, Sk, hs], Distribution::Normal(0.0, 1.0), &dev);
 
         let runs = if Sk <= 1024 { 20 } else { 5 };
         let t = time_it(runs, {
             let m = m.clone();
             let x = x.clone();
             move || {
-                let _ = m.forward_train(x.clone()).into_data();
+                let _ = m.forward_train::<Bare>(x.clone()).into_data();
             }
         });
 
@@ -145,15 +146,15 @@ fn bench_cuda() {
         c.validate();
         let mut c2 = c.clone();
         c2.mode = Gdn2Mode::FusedRecurrent;
-        let m = GatedDeltaNet2::<B>::new(&c2, &dev);
-        let x = Tensor::<B, 3>::random([B, Sk, hs], Distribution::Normal(0.0, 1.0), &dev);
+        let m = GatedDeltaNet2::new(&c2, &dev);
+        let x = Tensor::<3>::random([B, Sk, hs], Distribution::Normal(0.0, 1.0), &dev);
 
         let runs = if Sk <= 1024 { 5 } else { 2 };
         let t = time_it(runs, {
             let m = m.clone();
             let x = x.clone();
             move || {
-                let _ = m.forward_train(x.clone()).into_data();
+                let _ = m.forward_train::<Bare>(x.clone()).into_data();
             }
         });
 
@@ -171,16 +172,16 @@ fn bench_cuda() {
         let c = cfg(hs, nh, hk, ev, nvh, cs);
         let mut c2 = c.clone();
         c2.mode = Gdn2Mode::FusedRecurrent;
-        let m = GatedDeltaNet2::<Bare>::new(&c2, &dev);
-        let x = Tensor::<Bare, 3>::random([B, 1, hs], Distribution::Normal(0.0, 1.0), &dev);
+        let m = GatedDeltaNet2::new(&c2, &dev);
+        let x = Tensor::<3>::random([B, 1, hs], Distribution::Normal(0.0, 1.0), &dev);
 
         let steps = 200;
         let t = time_it(steps, {
             let m = m.clone();
             let x = x.clone();
             move || {
-                let mut state: Option<Gdn2State<Bare>> = None;
-                let _ = m.forward(x.clone(), &mut state, true).into_data();
+                let mut state: Option<Gdn2State> = None;
+                let _ = m.forward::<Bare>(x.clone(), &mut state, true).into_data();
             }
         });
 
@@ -201,9 +202,9 @@ fn bench_cuda() {
 fn fused_kernel_matches_tensor_path() {
     type Bare = burn_gdn2::CudaBare;
     let dev = Default::default();
-    let m = GatedDeltaNet2::<Bare>::new(&cfg(256, 4, 32, 1.0, None, 64), &dev);
+    let m = GatedDeltaNet2::new(&cfg(256, 4, 32, 1.0, None, 64), &dev);
     let seq = 16;
-    let x = Tensor::<Bare, 3>::random([1, seq, 256], Distribution::Normal(0.0, 1.0), &dev);
+    let x = Tensor::<3>::random([1, seq, 256], Distribution::Normal(0.0, 1.0), &dev);
     let (proj, _) = m.project(x.clone(), None);
 
     let hv = proj.hv;
@@ -219,15 +220,15 @@ fn fused_kernel_matches_tensor_path() {
         proj.g.clone(),
         proj.b.clone(),
         proj.w.clone(),
-        Tensor::<Bare, 4>::zeros([1, hv, hk, v_head], &dev),
+        Tensor::<4>::zeros([1, hv, hk, v_head], &dev),
         scale,
     );
 
     // Kernel path: token-by-token fused_step.
-    let mut state = Tensor::<Bare, 4>::zeros([1, hv, hk, v_head], &dev);
+    let mut state = Tensor::<4>::zeros([1, hv, hk, v_head], &dev);
     for t in 0..seq {
-        let sl = |tt: Tensor<Bare, 4>| tt.slice_dim(2, t..t + 1).mul_scalar(1.0);
-        let (o, ns) = fused_step(
+        let sl = |tt: Tensor<4>| tt.slice_dim(2, t..t + 1).mul_scalar(1.0);
+        let (o, ns) = fused_step::<Bare>(
             sl(proj.q.clone()),
             sl(proj.k.clone()),
             sl(proj.v.clone()),

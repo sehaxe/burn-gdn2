@@ -1,5 +1,5 @@
 use burn::tensor::activation::silu;
-use burn::tensor::{backend::Backend, Tensor};
+use burn::tensor::Tensor;
 
 /// Number of taps of the short convolution (kernel_size=4).
 pub const SHORT_CONV_KERNEL: usize = 4;
@@ -19,11 +19,11 @@ pub const SHORT_CONV_CACHE: usize = 3;
 ///
 /// Panics if `weight` does not have shape `[C, SHORT_CONV_KERNEL]` or if
 /// `cache` does not have shape `[B, SHORT_CONV_CACHE, C]`.
-pub fn short_conv_1d<B: Backend>(
-    x: Tensor<B, 3>,
-    weight: Tensor<B, 2>,
-    cache: Option<&Tensor<B, 3>>,
-) -> (Tensor<B, 3>, Tensor<B, 3>) {
+pub fn short_conv_1d(
+    x: Tensor<3>,
+    weight: Tensor<2>,
+    cache: Option<&Tensor<3>>,
+) -> (Tensor<3>, Tensor<3>) {
     let [b, t, c] = x.shape().dims();
     debug_assert_eq!(weight.shape().dims::<2>(), [c, SHORT_CONV_KERNEL]);
 

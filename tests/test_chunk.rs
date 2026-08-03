@@ -1,9 +1,9 @@
 #[test]
 #[cfg(feature = "binary-tests")]
 fn test_chunk_vs_reference() {
-    use burn::backend::{ndarray::NdArrayDevice, NdArray};
     use burn::module::Param;
     use burn::nn::{Linear, LinearConfig};
+    use burn::tensor::Device;
     use burn::tensor::{Tensor, TensorData};
     use burn_gdn2::{GatedDeltaNet2, Gdn2Config, Gdn2Mode, Gdn2State};
     use std::io::{Cursor, Read};
@@ -51,23 +51,19 @@ fn test_chunk_vs_reference() {
         c.read_exact(buf).unwrap();
         (shape, flat)
     }
-    fn t2(flat: &[f32], shape: &[usize], device: &NdArrayDevice) -> Tensor<NdArray, 2> {
+    fn t2(flat: &[f32], shape: &[usize], device: &NdArrayDevice) -> Tensor<2> {
         Tensor::from_data(TensorData::new(flat.to_vec(), shape.to_vec()), device)
     }
-    fn t1(flat: &[f32], shape: &[usize], device: &NdArrayDevice) -> Tensor<NdArray, 1> {
+    fn t1(flat: &[f32], shape: &[usize], device: &NdArrayDevice) -> Tensor<1> {
         Tensor::from_data(TensorData::new(flat.to_vec(), shape.to_vec()), device)
     }
-    fn lin_w(weight: Tensor<NdArray, 2>, device: &NdArrayDevice) -> Linear<NdArray> {
+    fn lin_w(weight: Tensor<2>, device: &NdArrayDevice) -> Linear {
         let [out_f, in_f] = weight.shape().dims::<2>();
         let mut lin = LinearConfig::new(in_f, out_f).with_bias(false).init(device);
         lin.weight = Param::from_tensor(weight);
         lin
     }
-    fn lin_wb(
-        weight: Tensor<NdArray, 2>,
-        bias: Tensor<NdArray, 1>,
-        device: &NdArrayDevice,
-    ) -> Linear<NdArray> {
+    fn lin_wb(weight: Tensor<2>, bias: Tensor<1>, device: &NdArrayDevice) -> Linear {
         let [out_f, in_f] = weight.shape().dims::<2>();
         let mut lin = LinearConfig::new(in_f, out_f).with_bias(true).init(device);
         lin.weight = Param::from_tensor(weight);
@@ -92,7 +88,7 @@ fn test_chunk_vs_reference() {
     }
     let n_cases = read_i32(&mut c) as usize;
 
-    let device = NdArrayDevice::Cpu;
+    let device = Device::NdArray;
     let get = |name: &str| -> &[f32] {
         let (_, _, d) = tensors.iter().find(|(n, _, _)| n == name).unwrap();
         d
@@ -200,11 +196,11 @@ fn test_chunk_vs_reference() {
 #[test]
 #[cfg(feature = "binary-tests")]
 fn test_chunk_matches_fused_with_real_decay() {
-    use burn::backend::{ndarray::NdArrayDevice, NdArray};
+    use burn::tensor::Device;
     use burn::tensor::{Distribution, Tensor};
     use burn_gdn2::{chunk_wy_forward, fused_recurrent_forward};
 
-    let device = NdArrayDevice::Cpu;
+    let device = Device::NdArray;
     let (b, h, t, k, vd, c) = (2usize, 3usize, 130usize, 16usize, 8usize, 64usize);
 
     // Strong, non-uniform per-channel decay: log-decay in [-0.15, -0.01]

@@ -2,9 +2,10 @@
 #![allow(dead_code)]
 use std::io::{Cursor, Read};
 
-use burn::backend::{ndarray::NdArrayDevice, NdArray};
+use burn::backend::NdArray;
 use burn::module::Param;
 use burn::nn::{Linear, LinearConfig};
+use burn::tensor::Device;
 use burn::tensor::{Tensor, TensorData};
 use burn_gdn2::{GatedDeltaNet2, Gdn2Config, Gdn2Mode};
 
@@ -54,26 +55,22 @@ fn read_raw_f32_tensor(c: &mut Cursor<&[u8]>) -> (Vec<usize>, Vec<f32>) {
     (shape, flat)
 }
 
-fn t2(flat: &[f32], shape: &[usize], device: &NdArrayDevice) -> Tensor<NdArray, 2> {
+fn t2(flat: &[f32], shape: &[usize], device: &Device) -> Tensor<2> {
     Tensor::from_data(TensorData::new(flat.to_vec(), shape.to_vec()), device)
 }
-fn t1(flat: &[f32], shape: &[usize], device: &NdArrayDevice) -> Tensor<NdArray, 1> {
+fn t1(flat: &[f32], shape: &[usize], device: &Device) -> Tensor<1> {
     Tensor::from_data(TensorData::new(flat.to_vec(), shape.to_vec()), device)
 }
-fn t3(flat: &[f32], shape: &[usize], device: &NdArrayDevice) -> Tensor<NdArray, 3> {
+fn t3(flat: &[f32], shape: &[usize], device: &Device) -> Tensor<3> {
     Tensor::from_data(TensorData::new(flat.to_vec(), shape.to_vec()), device)
 }
-fn lin_w(weight: Tensor<NdArray, 2>, device: &NdArrayDevice) -> Linear<NdArray> {
+fn lin_w(weight: Tensor<2>, device: &Device) -> Linear {
     let [out_f, in_f] = weight.shape().dims::<2>();
     let mut lin = LinearConfig::new(in_f, out_f).with_bias(false).init(device);
     lin.weight = Param::from_tensor(weight);
     lin
 }
-fn lin_wb(
-    weight: Tensor<NdArray, 2>,
-    bias: Tensor<NdArray, 1>,
-    device: &NdArrayDevice,
-) -> Linear<NdArray> {
+fn lin_wb(weight: Tensor<2>, bias: Tensor<1>, device: &Device) -> Linear {
     let [out_f, in_f] = weight.shape().dims::<2>();
     let mut lin = LinearConfig::new(in_f, out_f).with_bias(true).init(device);
     lin.weight = Param::from_tensor(weight);
@@ -104,7 +101,7 @@ fn test_gdn2_1000_cases() {
     let n_cases = read_i32(&mut c) as usize;
     assert_eq!(n_cases, 1000);
 
-    let device = NdArrayDevice::Cpu;
+    let device = Device::ndarray();
     let cfg = Gdn2Config {
         hidden_size: d,
         num_heads: h,
@@ -161,7 +158,7 @@ fn test_gdn2_1000_cases() {
         let input = t3(&in_data, &in_shape, &device);
         let ref_out = t3(&out_data, &out_shape, &device);
 
-        let mut state: Option<Gdn2State<NdArray>> = None;
+        let mut state: Option<Gdn2State> = None;
         let output = module.forward(input, &mut state, true);
 
         let out_bytes: Vec<f32> = output
@@ -220,11 +217,7 @@ const BENCH_MODELS: &[BenchCfg] = &[BenchCfg {
     hk: 64,
 }];
 
-fn bench_model<B: burn::tensor::backend::Backend>(
-    label: &str,
-    device: &B::Device,
-    seq_lens: &[usize],
-) {
+fn bench_model(label: &str, device: &Device, seq_lens: &[usize]) {
     for bc in BENCH_MODELS {
         for mode in [Gdn2Mode::FusedRecurrent, Gdn2Mode::Chunk] {
             let cfg = Gdn2Config {
@@ -240,7 +233,7 @@ fn bench_model<B: burn::tensor::backend::Backend>(
                 chunk_size: 64,
                 min_decay: None,
             };
-            let module = GatedDeltaNet2::<B>::new(&cfg, device);
+            let module = GatedDeltaNet2::new(&cfg, device);
 
             for &seq_len in seq_lens {
                 let n_iters = if seq_len >= 4096 {
@@ -250,21 +243,25 @@ fn bench_model<B: burn::tensor::backend::Backend>(
                 } else {
                     20
                 };
-                let input = Tensor::<B, 3>::zeros([1, seq_len, bc.d], device);
-                let mut state: Option<burn_gdn2::Gdn2State<B>> = None;
+                let input = Tensor::<3>::zeros([1, seq_len, bc.d], device);
+                let mut state: Option<burn_gdn2::Gdn2State> = None;
 
                 for _ in 0..3 {
                     let _ = match mode {
-                        Gdn2Mode::FusedRecurrent => module.forward(input.clone(), &mut state, true),
-                        Gdn2Mode::Chunk => module.forward_train(input.clone()),
+                        Gdn2Mode::FusedRecurrent => {
+                            module.forward::<NdArray>(input.clone(), &mut state, true)
+                        }
+                        Gdn2Mode::Chunk => module.forward_train::<NdArray>(input.clone()),
                     };
                 }
 
                 let start = std::time::Instant::now();
                 for _ in 0..n_iters {
                     let _ = match mode {
-                        Gdn2Mode::FusedRecurrent => module.forward(input.clone(), &mut state, true),
-                        Gdn2Mode::Chunk => module.forward_train(input.clone()),
+                        Gdn2Mode::FusedRecurrent => {
+                            module.forward::<NdArray>(input.clone(), &mut state, true)
+                        }
+                        Gdn2Mode::Chunk => module.forward_train::<NdArray>(input.clone()),
                     };
                 }
                 let elapsed = start.elapsed();
@@ -287,10 +284,10 @@ fn bench_model<B: burn::tensor::backend::Backend>(
 
 #[test]
 fn bench_ndarray_short() {
-    bench_model::<NdArray>("ND", &NdArrayDevice::Cpu, &[64, 256]);
+    bench_model("ND", &Device::ndarray(), &[64, 256]);
 }
 
 #[test]
 fn bench_ndarray_single() {
-    bench_model::<NdArray>("ND", &NdArrayDevice::Cpu, &[64]);
+    bench_model("ND", &Device::ndarray(), &[64]);
 }

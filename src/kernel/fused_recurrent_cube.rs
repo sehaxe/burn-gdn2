@@ -13,15 +13,15 @@ use cubecl::prelude::*;
 /// for the erase term (b⊙k)ᵀS instead of shared memory.
 #[cube(launch_unchecked)]
 fn gdn2_step_kernel<F: Float>(
-    q: &Array<F>,
-    k: &Array<F>,
-    v: &Array<F>,
-    g: &Array<F>,
-    b: &Array<F>,
-    w: &Array<F>,
-    state_in: &Array<F>,
-    state_out: &mut Array<F>,
-    out: &mut Array<F>,
+    q: &[F],
+    k: &[F],
+    v: &[F],
+    g: &[F],
+    b: &[F],
+    w: &[F],
+    state_in: &[F],
+    state_out: &mut [F],
+    out: &mut [F],
     k_dim: u32,
     v_dim: u32,
     scale: f32,
@@ -39,7 +39,7 @@ fn gdn2_step_kernel<F: Float>(
     for kk in 0..kd {
         let s = state_in[s_base + kk * vd + lane];
         let eg = F::exp(g[k_base + kk]);
-        erased = erased + s * eg * b[k_base + kk] * k[k_base + kk];
+        erased += s * eg * b[k_base + kk] * k[k_base + kk];
     }
     // v_new = w ⊙ v - erased
     let v_new = w[v_base + lane] * v[v_base + lane] - erased;
@@ -51,7 +51,7 @@ fn gdn2_step_kernel<F: Float>(
         let eg = F::exp(g[k_base + kk]);
         let s2 = s * eg + k[k_base + kk] * v_new;
         state_out[s_base + kk * vd + lane] = s2;
-        acc = acc + s2 * q[k_base + kk];
+        acc += s2 * q[k_base + kk];
     }
     out[v_base + lane] = acc * F::cast_from(scale);
 }
@@ -59,9 +59,10 @@ fn gdn2_step_kernel<F: Float>(
 #[cfg(feature = "cuda")]
 pub mod cuda {
     use super::*;
+    use burn::backend::{Backend, DispatchKindConversion};
+    use burn::tensor::{DispatchTensor, Tensor};
     use burn_cubecl::tensor::CubeTensor;
     use burn_cubecl::CubeBackend;
-    use burn_tensor::{backend::Backend, Tensor};
     use std::any::{Any, TypeId};
 
     /// The bare (non-fusion) CUDA backend the fused kernel targets.
@@ -71,7 +72,7 @@ pub mod cuda {
     /// `CubeTensor` without a host round-trip, so fused dispatch only activates
     /// on this type (and on `burn_cuda::Cuda` built without the `fusion`
     /// feature, which aliases to it). Everything else falls back to tensor ops.
-    pub type CudaBare = CubeBackend<cubecl::cuda::CudaRuntime, f32, i32, u8>;
+    pub type CudaBare = CubeBackend<cubecl::cuda::CudaRuntime>;
 
     fn is_cuda<B: Backend>() -> bool {
         TypeId::of::<B>() == TypeId::of::<CudaBare>()
@@ -83,14 +84,17 @@ pub mod cuda {
     /// fusion-wrapped `burn_cuda::Cuda`, or a non-CUDA backend) — the caller
     /// then falls back to the tensor-ops path. Dims of size 1 are ignored, so
     /// permuted single-token views still qualify.
-    fn cube_of<B: Backend>(t: &Tensor<B, 4>) -> Option<CubeTensor<cubecl::cuda::CudaRuntime>> {
+    fn cube_of<B: Backend>(t: &Tensor<4>) -> Option<CubeTensor<cubecl::cuda::CudaRuntime>>
+    where
+        DispatchTensor: DispatchKindConversion<B>,
+    {
         if !is_cuda::<B>() {
             return None;
         }
-        let prim = t.clone().into_primitive().tensor();
+        let prim = t.clone().try_into_primitive::<B>().ok()?;
         let cube = (&prim as &dyn Any).downcast_ref::<CubeTensor<cubecl::cuda::CudaRuntime>>()?;
         let shape = cube.meta.shape().dims::<4>();
-        let strides = cube.meta.strides();
+        let strides = cube.meta.strides().to_vec();
         let mut expected = 1usize;
         for i in (0..4).rev() {
             if shape[i] > 1 && strides[i] != expected {
@@ -106,15 +110,18 @@ pub mod cuda {
     /// limits, in which case the caller falls back to the tensor-ops path.
     #[allow(clippy::too_many_arguments)]
     pub fn fused_step<B: Backend>(
-        q: Tensor<B, 4>,
-        k: Tensor<B, 4>,
-        v: Tensor<B, 4>,
-        g: Tensor<B, 4>,
-        b: Tensor<B, 4>,
-        w: Tensor<B, 4>,
-        state: Tensor<B, 4>,
+        q: Tensor<4>,
+        k: Tensor<4>,
+        v: Tensor<4>,
+        g: Tensor<4>,
+        b: Tensor<4>,
+        w: Tensor<4>,
+        state: Tensor<4>,
         scale: f64,
-    ) -> Option<(Tensor<B, 4>, Tensor<B, 4>)> {
+    ) -> Option<(Tensor<4>, Tensor<4>)>
+    where
+        DispatchTensor: DispatchKindConversion<B>,
+    {
         let [batch, hv, _, _] = q.shape().dims::<4>();
         let k_dim = q.shape().dims::<4>()[3];
         let v_dim = v.shape().dims::<4>()[3];
@@ -124,23 +131,23 @@ pub mod cuda {
         }
 
         let device = state.device();
-        let q = cube_of(&q)?;
-        let k = cube_of(&k)?;
-        let v = cube_of(&v)?;
-        let g = cube_of(&g)?;
-        let b = cube_of(&b)?;
-        let w = cube_of(&w)?;
-        let state = cube_of(&state)?;
+        let q = cube_of::<B>(&q)?;
+        let k = cube_of::<B>(&k)?;
+        let v = cube_of::<B>(&v)?;
+        let g = cube_of::<B>(&g)?;
+        let b = cube_of::<B>(&b)?;
+        let w = cube_of::<B>(&w)?;
+        let state = cube_of::<B>(&state)?;
 
         let client = state.client.clone();
         let n_heads = heads * v_dim;
         let n_keys = heads * k_dim;
         let n_state = heads * k_dim * v_dim;
 
-        let out = Tensor::<B, 4>::zeros([batch, hv, 1, v_dim], &device);
-        let new_state = Tensor::<B, 4>::zeros([batch, hv, k_dim, v_dim], &device);
-        let out_cube = cube_of(&out).expect("backend mismatch");
-        let new_state_cube = cube_of(&new_state).expect("backend mismatch");
+        let out = Tensor::<4>::zeros([batch, hv, 1, v_dim], &device);
+        let new_state = Tensor::<4>::zeros([batch, hv, k_dim, v_dim], &device);
+        let out_cube = cube_of::<B>(&out).expect("backend mismatch");
+        let new_state_cube = cube_of::<B>(&new_state).expect("backend mismatch");
 
         let cube_dim = CubeDim {
             x: v_dim as u32,
@@ -153,15 +160,15 @@ pub mod cuda {
                 &client,
                 cube_count,
                 cube_dim,
-                ArrayArg::from_raw_parts(q.handle, n_keys),
-                ArrayArg::from_raw_parts(k.handle, n_keys),
-                ArrayArg::from_raw_parts(v.handle, n_heads),
-                ArrayArg::from_raw_parts(g.handle, n_keys),
-                ArrayArg::from_raw_parts(b.handle, n_keys),
-                ArrayArg::from_raw_parts(w.handle, n_heads),
-                ArrayArg::from_raw_parts(state.handle, n_state),
-                ArrayArg::from_raw_parts(new_state_cube.handle, n_state),
-                ArrayArg::from_raw_parts(out_cube.handle, n_heads),
+                BufferArg::from_raw_parts(q.handle, n_keys),
+                BufferArg::from_raw_parts(k.handle, n_keys),
+                BufferArg::from_raw_parts(v.handle, n_heads),
+                BufferArg::from_raw_parts(g.handle, n_keys),
+                BufferArg::from_raw_parts(b.handle, n_keys),
+                BufferArg::from_raw_parts(w.handle, n_heads),
+                BufferArg::from_raw_parts(state.handle, n_state),
+                BufferArg::from_raw_parts(new_state_cube.handle, n_state),
+                BufferArg::from_raw_parts(out_cube.handle, n_heads),
                 k_dim as u32,
                 v_dim as u32,
                 scale as f32,
