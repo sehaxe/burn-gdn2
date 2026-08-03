@@ -30,6 +30,7 @@ burn-ndarray = { version = "0.22.0-pre.1", features = ["blas-openblas"] }
 burn-cuda = { version = "0.22.0-pre.1", default-features = false }
 burn-autodiff = "0.22.0-pre.1"
 burn = { version = "0.22.0-pre.1", default-features = false, features = ["ndarray", "autodiff", "cuda", "extension"] }
+half = "2"
 
 [package.metadata.docs.rs]
 all-features = true
