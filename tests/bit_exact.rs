@@ -6,7 +6,7 @@ use burn::backend::{ndarray::NdArrayDevice, NdArray};
 use burn::module::Param;
 use burn::nn::{Linear, LinearConfig};
 use burn::tensor::{Tensor, TensorData};
-use burn_gdn2::{GatedDeltaNet2, Gdn2Config, Gdn2Mode, Gdn2State};
+use burn_gdn2::{GatedDeltaNet2, Gdn2Config, Gdn2Mode};
 
 const EPSILON: f32 = 5e-4;
 
