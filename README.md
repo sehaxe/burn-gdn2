@@ -29,7 +29,7 @@ cargo add burn-gdn2
 Enable CUDA:
 
 ```toml
-burn-gdn2 = { version = "0.4", features = ["cuda"] }
+burn-gdn2 = { version = "0.5", features = ["cuda"] }
 ```
 
 ## Quick start
@@ -92,6 +92,22 @@ o_t = q_t^T S_t
 gate (value axis); `α_t` is the per-channel decay from `A_log` and
 `softplus(F(x) + dt_bias)`.
 
+### Fused CUDA kernels (v0.5+)
+
+On the bare CUDA backend the whole chunked forward runs as **two custom cubecl
+kernels** instead of the per-chunk tensor-op loop:
+
+- `gdn2_chunk_intra_kernel` — chunk-local precomputation (decays, score
+  matrices, `A = (I + T)^{-1}`, pseudo-keys/values) in a single launch.
+- `gdn2_chunk_inter_kernel` — the sequential recurrence across chunks with
+  the in-loop output phase, prefetching `w`/`kgd` through shared memory when
+  the head dim allows.
+
+Dispatch is gated on `burn_gdn2::CudaBare` (the bare `CubeBackend`, exported
+for convenience); every other backend transparently falls back to the tensor
+path. The fused path is numerically verified against the tensor path
+(`fused_kernel_matches_tensor_path` in `tests/bench_cuda.rs`).
+
 ## Configuration
 
 | Field | Default | Description |
@@ -114,25 +130,28 @@ construction.
 
 ## Performance
 
-Measured on RTX 5060 Ti, release build, Burn 0.21. Both sides sync to the
-host per iteration, so the comparison is GPU time, not launch overhead. The
-equivalent PyTorch layer is the reference architecture (`lit_gpt/gdn2.py`)
-with the fused recurrent scan implemented in plain torch ops (their Triton
-kernels are NVIDIA-only and their fla pin is not reproducible, so this is the
-honest comparison point):
+Measured on RTX 5060 Ti, release build, Burn 0.21, fp32, best-of-N loop
+timing. `burn-gdn2` runs through the fused chunked CUDA kernels; the NVlabs
+side is their Triton implementation (`chunk_gdn2`).
 
-| Config | burn-gdn2 chunk | burn-gdn2 fused | PyTorch fused | vs PyTorch |
-|--------|-----------------|-----------------|---------------|------------|
-| d=256, T=1024 | 10,635 tok/s | 8,968 tok/s | 7,221 tok/s | **1.5×** |
-| d=512, T=2048 | 10,619 tok/s | 8,939 tok/s | 7,624 tok/s | **1.4×** |
-| d=1024, T=4096 | 12,451 tok/s | 9,402 tok/s | 7,666 tok/s | **1.6×** |
+| Config | burn-gdn2 | NVlabs Triton | vs NVlabs |
+|--------|-----------|---------------|-----------|
+| d=256, T=256 | 0.076 ms | 0.561 ms | **7.4×** |
+| d=512, T=1024 | 0.237 ms | 0.536 ms | **2.3×** |
+| d=1024, T=2048 | 0.868 ms | 0.628 ms | 1.4× slower |
+| d=2048, T=4096 | 3.887 ms | 1.461 ms | 2.7× slower |
+
+Small/medium configs win by a wide margin; long sequences with wide heads
+(large/xl) still lose to the Triton recurrence, whose register-resident state
+avoids our per-chunk shared-memory barrier chain. The chunk-size is fixed at
+64 in both implementations.
 
 Run it yourself:
 
 ```bash
-# burn side
+# burn side (fused path, correctness-verified against the tensor path)
 cargo test --release --features cuda -p burn-gdn2 --test bench_cuda -- --ignored --nocapture
-# torch side (same GPU, same configs)
+# NVlabs side (same GPU, same configs)
 python3 bench_torch.py
 ```
 
@@ -148,8 +167,7 @@ Notes:
   (`burn_gdn2::CudaBare`, re-exported for convenience); the default
   `burn_cuda::Cuda` is `Fusion<CubeBackend>`-wrapped and has no public way to
   hand out its underlying `CubeTensor`, so it transparently falls back to the
-  tensor path. The fused path is numerically verified against the tensor path
-  (`fused_kernel_matches_tensor_path`).
+  tensor path.
 
 ## Tests
 
