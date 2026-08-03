@@ -2853,8 +2853,8 @@ fn rr_inter_bench() {
     );
     let _ = io.out.clone().into_data();
     for n in [1usize, 2, 4] {
-
-        let t0 = std::time::Instant::now();        let mut last = None;
+        let t0 = std::time::Instant::now();
+        let mut last = None;
         for _ in 0..n {
             last = Some(inter_launch_raw::<Bare>(
                 io.aqk.clone(),
@@ -2917,8 +2917,8 @@ fn rr_inter_bench() {
         let _ = client.read_one_unchecked(out_h.clone());
     }
     for n in [1usize, 2, 4] {
-
-        let t0 = std::time::Instant::now();        for _ in 0..n {
+        let t0 = std::time::Instant::now();
+        for _ in 0..n {
             unsafe {
                 rr_inter_kernel::launch(
                     &client,

@@ -201,3 +201,31 @@ python3 tests/gen_reference.py                  # regenerate tests/ref_data.bin
 ## License
 
 AGPL-3.0. See [LICENSE](LICENSE).
+
+## Fused CUDA kernels (v0.5+)
+
+...existing...
+
+### Findings on cubecl 0.11.0-pre.1 (branch burn-0.22)
+
+Codegen bugs hit and worked around while porting the register-resident
+recurrence to the pre-release codegen:
+
+- `cmma::execute_elementwise_op` panics in DSD post-processing (use the
+  `(diag-I) @ S` mma trick for decay instead).
+- Runtime-indexed shared-memory slices passed to `cmma::Matrix::from_slice`
+  silently produce garbage (unroll or keep matrix inputs in global memory).
+- tf32 (`f32` matrices) wmma does not compile on sm_120 through the
+  nvcuda::wmma path - use f16 inputs with f32 accumulators.
+- `range_stepped` with a non-constant step generates invalid CUDA (use
+  while-loops).
+- Repeated `let mut i` (shadowing) across consecutive while-loops breaks
+  expansion (some loops silently disappear) - use unique names.
+- `into_data()`/`client.sync()` do not reliably wait for kernels on the
+  pre-release dispatch; benchmark by queuing N launches and reading the
+  handle once.
+- Accumulating (c += a@b) mma chains into long-lived accumulators from
+  runtime loops intermittently produce zero/partial results in the compact
+  (non-unrolled) kernel variant; the fully-unrolled variant is correct but
+  icache-bound (~1.4ms/chunk at kd=128 vs 0.08ms/chunk for the compact
+  variant).
