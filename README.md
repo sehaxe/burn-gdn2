@@ -108,6 +108,14 @@ for convenience); every other backend transparently falls back to the tensor
 path. The fused path is numerically verified against the tensor path
 (`fused_kernel_matches_tensor_path` in `tests/bench_cuda.rs`).
 
+> **Training with `Autodiff<Cuda>`:** the fused kernels are forward-only and
+> are not wired into burn's autodiff graph, so the standard training backend
+> `Autodiff<Cuda>` takes the (slower but exact) tensor path. The fused path
+> only applies on the bare `CudaBare` backend, which has no automatic
+> gradients. If you train with autodiff and wonder why you do not see the
+> fused numbers in a profiler, this is why. Making the kernels autodiff-aware
+> (hand-written backward passes) is the remaining performance work.
+
 ## Configuration
 
 | Field | Default | Description |
