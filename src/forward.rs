@@ -80,7 +80,7 @@ pub fn chunk_wy_forward_impl(
     let w_gate = w_gate.mul_scalar(1.0);
     let mut scratch = ChunkWyScratch { chunks: Vec::new() };
     let tril_full = tril_matrix(chunk_size, &device);
-    let (causal_full, strict_full) = chunk_masks(chunk_size, &device);
+    let (_causal_full, strict_full) = chunk_masks(chunk_size, &device);
     // scale folded into the causal mask, eye pre-broadcast: hoisted so the
     // chunk loop pays one mul / one eye instead of two / three ops.
     let scale_causal_full = tril_full.clone() * scale;
