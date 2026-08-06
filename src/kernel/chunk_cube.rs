@@ -697,7 +697,11 @@ pub mod cuda {
         if time % c != 0 || time == 0 {
             return None;
         }
-        if c > 64 || k_dim > 256 || v_dim > 256 {
+        // Numerical limit, not a hardware one: the naive K/exp(cumsum(g))
+        // factor underflows f32 once cumsum(g) < -88, i.e. at chunk > 17 with
+        // the K3 floor g = -5. FlashKDA picked chunk 16 for exactly this
+        // reason; larger chunks go through the K3 16-tile tensor path.
+        if c > 16 || k_dim > 256 || v_dim > 256 {
             return None; // kernel limits, fall back
         }
         let nt = time / c;

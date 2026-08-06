@@ -336,3 +336,52 @@ fn rel_diff_2d<const D: usize>(a: Tensor<D>, b: Tensor<D>) -> f32 {
     }
     max_abs / scale.max(1e-30)
 }
+
+/// The K3 16-tile log-space decay scheme must stay finite at chunk 64 with
+/// strong gates (g ~ -5 per token, naive K/exp(cumsum) would underflow to 0
+/// and produce inf).
+#[test]
+fn chunk64_strong_decay_stays_finite() {
+    let device = Device::ndarray();
+    let (batch, heads, time, k_dim, v_dim) = (1usize, 1usize, 128usize, 8usize, 8usize);
+    let mk = |shape: [usize; 4], dist: Distribution| Tensor::<4>::random(shape, dist, &device);
+    let q = mk([batch, heads, time, k_dim], Distribution::Normal(0.0, 0.1));
+    let k = mk([batch, heads, time, k_dim], Distribution::Normal(0.0, 0.1));
+    let v = mk([batch, heads, time, v_dim], Distribution::Normal(0.0, 0.1));
+    // strong decay: every token at the K3 floor g = -5
+    let g = Tensor::<4>::full([batch, heads, time, k_dim], -5.0, &device);
+    let b = mk([batch, heads, time, k_dim], Distribution::Uniform(0.0, 0.1));
+    let w = mk([batch, heads, time, v_dim], Distribution::Uniform(0.0, 0.1));
+    let s = mk([batch, heads, k_dim, v_dim], Distribution::Normal(0.0, 0.1));
+    let scale = (k_dim as f64).powf(-0.5);
+
+    let (out, new_state) = chunk_wy_forward(q.clone(), k.clone(), v.clone(), g, b.clone(), w.clone(), s.clone(), scale, 64);
+    // naive form would produce inf/NaN here; everything must be finite
+    let mut max_abs = 0.0f32;
+    for (t, name) in [(out.clone().into_data(), "out"), (new_state.into_data(), "state")] {
+        for x in t.bytes.chunks_exact(4) {
+            let v = f32::from_le_bytes(x.try_into().unwrap());
+            assert!(v.is_finite(), "{name} not finite: {v}");
+            max_abs = max_abs.max(v.abs());
+        }
+    }
+    // sanity: with the floor decay the output is driven by the first tokens
+    let _ = max_abs;
+    // and the chunked path must agree with the token-by-token recurrence
+    let (ref_out, _) = burn_gdn2::fused_recurrent_forward(
+        q, k, v, Tensor::<4>::full([batch, heads, time, k_dim], -5.0, &device),
+        b, w, s, scale,
+    );
+    let a = out.into_data();
+    let bb = ref_out.into_data();
+    let mut max_abs = 0.0f32;
+    let mut scale_v = 0.0f32;
+    for (x, y) in a.bytes.chunks_exact(4).zip(bb.bytes.chunks_exact(4)) {
+        let x = f32::from_le_bytes(x.try_into().unwrap());
+        let y = f32::from_le_bytes(y.try_into().unwrap());
+        max_abs = max_abs.max((x - y).abs());
+        scale_v = scale_v.max(x.abs()).max(y.abs());
+    }
+    let rel = max_abs / scale_v.max(1e-30);
+    assert!(rel < 1e-3, "chunk64 vs fused-recurrent mismatch: rel={rel:.2e}");
+}

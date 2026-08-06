@@ -25,11 +25,13 @@ fn max_rel(a: &Tensor<4>, b: &Tensor<4>) -> f32 {
 fn fused_chunk_matches_tensor_path() {
     type B = CudaBare;
     let dev: Device = Default::default();
+    // chunk <= 16: the fused kernels' numerical range (K3 design). Larger
+    // chunks fall back to the 16-tile tensor path (checked separately).
     for (batch, heads, time, k_dim, v_dim, cs) in [
-        (1usize, 4usize, 64usize, 64usize, 64usize, 64usize),
-        (1usize, 4usize, 256usize, 64usize, 64usize, 64usize),
-        (2, 8, 2048, 64, 64, 64),
-        (1, 8, 4096, 128, 128, 64),
+        (1usize, 4usize, 64usize, 64usize, 64usize, 16usize),
+        (1usize, 4usize, 256usize, 64usize, 64usize, 16usize),
+        (2, 8, 2048, 64, 64, 16),
+        (1, 8, 4096, 128, 128, 16),
     ] {
         let q = Tensor::<4>::random([batch, heads, time, k_dim], Distribution::Normal(0.0, 0.1), &dev);
         let k = Tensor::<4>::random([batch, heads, time, k_dim], Distribution::Normal(0.0, 0.1), &dev);
@@ -53,10 +55,6 @@ fn fused_chunk_matches_tensor_path() {
         println!(
             "B={batch} H={heads} T={time} k={k_dim} v={v_dim}: out_rel={do_out:.2e} state_rel={d_s:.2e}"
         );
-        // The tensor path itself carries ~1e-4..1e-3 relative fp32 noise in
-        // this regime (E = exp(cumsum(g)) spans a huge dynamic range; the
-        // kernel was verified against an exact reference at ~1e-7), so the
-        // comparison tolerance is set accordingly.
         assert!(do_out < 1e-3, "out mismatch: {do_out:.2e}");
         assert!(d_s < 1e-3, "state mismatch: {d_s:.2e}");
     }
@@ -70,7 +68,7 @@ fn fused_op_grads_match_tensor_path_cuda() {
     use burn::tensor::Device as D;
     let plain: D = Default::default();
     let dev = burn::tensor::Device::autodiff(plain);
-    let (batch, heads, time, k_dim, v_dim, cs) = (1usize, 2usize, 128usize, 32usize, 32usize, 32usize);
+    let (batch, heads, time, k_dim, v_dim, cs) = (1usize, 2usize, 128usize, 32usize, 32usize, 16usize);
     let scale = (k_dim as f64).powf(-0.5);
     let mk = |shape: [usize; 4], dist: Distribution| Tensor::<4>::random(shape, dist, &dev).require_grad();
     let q = mk([batch, heads, time, k_dim], Distribution::Normal(0.0, 0.1));

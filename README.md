@@ -159,9 +159,13 @@ comparison is parity.
 
 Same scope on both sides: the chunk recurrence only, on precomputed
 q/k/v/g/b/w. burn side: `fused_chunk_forward` (intra + inter, 2 launches per
-chunk); torch side: the reference Triton kernels from the NVlabs repo
-(`chunk_gdn2`), which is the only fused GDN-2 kernel in the PyTorch ecosystem
-— PyTorch itself ships none.
+chunk) at **chunk ≤ 16** — the numerical limit of the naive decay form, the
+same design choice as FlashKDA (`exp(cumsum(g))` underflows f32 once
+`cumsum(g) < -88`, i.e. chunk > 17 at the K3 floor `g = -5`); larger chunks
+run the K3 16-tile log-space tensor path, which is stable at any length.
+torch side: the reference Triton kernels from the NVlabs repo (`chunk_gdn2`),
+the only fused GDN-2 kernel in the PyTorch ecosystem — PyTorch itself ships
+none.
 
 | Config | burn-gdn2 fused | NVlabs Triton | vs Triton |
 |--------|-----------------|---------------|-----------|

@@ -72,7 +72,8 @@ where
 
         let d_out = Tensor::from_primitive::<B>(grads.consume::<B>(&ops.node));
 
-        let [batch, heads, _time, k_dim] = k.shape().dims::<4>();
+        let [batch, heads, time, k_dim] = k.shape().dims::<4>();
+        let v_dim = v.shape().dims::<4>()[3];
         let device = k.device();
         let n_chunks = scratch.chunks.len();
 
@@ -81,17 +82,44 @@ where
         // trajectory. Chunk i's adjoint uses the state *before* chunk i, and
         // the state output of chunk i feeds chunk i+1 (BPTT), so the state
         // adjoint accumulates backwards over chunks.
+        // The scratch chunks are padded to a 16-token tile multiple (K3
+        // scheme); the checkpoint slices must be padded identically.
+        let pad_to = |t: Tensor<4>, c_pad: usize, d: usize| -> Tensor<4> {
+            let cc = t.shape().dims::<4>()[2];
+            if cc == c_pad {
+                t
+            } else {
+                Tensor::cat(vec![t, Tensor::zeros([batch, heads, c_pad - cc, d], &device)], 2)
+            }
+        };
         let mut s_traj: Vec<Tensor<4>> = Vec::with_capacity(n_chunks + 1);
         s_traj.push(s_in.clone());
         for (ci, sc) in scratch.chunks.iter().enumerate() {
-            let c = sc.g_exp.shape().dims::<4>()[2];
+            let c_pad = sc.g_exp.shape().dims::<4>()[2];
             let start = ci * chunk_size;
+            let c_real = (start + chunk_size).min(time) - start;
             let g_exp = sc.g_exp.clone();
-            let g_last = g_exp.clone().slice([0..batch, 0..heads, c - 1..c]);
-            let k_c = k.clone().slice([0..batch, 0..heads, start..start + c]);
-            let v_c = v.clone().slice([0..batch, 0..heads, start..start + c]);
-            let b_c = b.clone().slice([0..batch, 0..heads, start..start + c]);
-            let w_c = w.clone().slice([0..batch, 0..heads, start..start + c]);
+            let g_last = g_exp.clone().slice([0..batch, 0..heads, c_real - 1..c_real]);
+            let k_c = pad_to(
+                k.clone().slice([0..batch, 0..heads, start..start + c_real]),
+                c_pad,
+                k_dim,
+            );
+            let v_c = pad_to(
+                v.clone().slice([0..batch, 0..heads, start..start + c_real]),
+                c_pad,
+                v_dim,
+            );
+            let b_c = pad_to(
+                b.clone().slice([0..batch, 0..heads, start..start + c_real]),
+                c_pad,
+                k_dim,
+            );
+            let w_c = pad_to(
+                w.clone().slice([0..batch, 0..heads, start..start + c_real]),
+                c_pad,
+                v_dim,
+            );
             let rhs_k = b_c.clone() * k_c.clone() * g_exp.clone();
             let rhs_v = w_c.clone() * v_c.clone();
             let w_wy = sc.m_inv.clone().matmul(rhs_k);
@@ -122,23 +150,44 @@ where
 
         for (ri, sc) in scratch.chunks.iter().rev().enumerate() {
             let ci = n_chunks - 1 - ri;
-            let c = sc.g_exp.shape().dims::<4>()[2];
+            let c_pad = sc.g_exp.shape().dims::<4>()[2];
             let start = ci * chunk_size;
+            let c_real = (start + chunk_size).min(time) - start;
             let range = |l: usize, d: usize| [0..batch, 0..heads, l..l + d];
 
-            let (scale_causal, strict) = if c == chunk_size {
+            let (scale_causal, strict) = if c_pad == chunk_size {
                 (scale_causal_full.clone(), strict_full.clone())
             } else {
-                let (cau, str) = chunk_masks(c, &device);
+                let (cau, str) = chunk_masks(c_pad, &device);
                 (cau * scale, str)
             };
             let g_exp = sc.g_exp.clone();
             let q_gated = sc.q_gated.clone();
-            let k_c = k.clone().slice(range(start, c));
-            let v_c = v.clone().slice(range(start, c));
-            let b_c = b.clone().slice(range(start, c));
-            let w_c = w.clone().slice(range(start, c));
-            let d_out_c = d_out.clone().slice(range(start, c));
+            let k_c = pad_to(
+                k.clone().slice(range(start, c_real)),
+                c_pad,
+                k_dim,
+            );
+            let v_c = pad_to(
+                v.clone().slice(range(start, c_real)),
+                c_pad,
+                v_dim,
+            );
+            let b_c = pad_to(
+                b.clone().slice(range(start, c_real)),
+                c_pad,
+                k_dim,
+            );
+            let w_c = pad_to(
+                w.clone().slice(range(start, c_real)),
+                c_pad,
+                v_dim,
+            );
+            let d_out_c = pad_to(
+                d_out.clone().slice(range(start, c_real)),
+                c_pad,
+                v_dim,
+            );
             let s_before = s_traj[ci].clone();
 
             // Re-derive the per-chunk values (identical ops to the forward
@@ -157,7 +206,9 @@ where
 
             // BPTT through the state output S_out = S·E_last^T + (k·decay)^T·v_new:
             // d_K̂ = v_new·d_state_acc^T, d_v_new += K̂·d_state_acc.
-            let g_last = g_exp.clone().slice([0..batch, 0..heads, c - 1..c]);
+            let g_last = g_exp
+                .clone()
+                .slice([0..batch, 0..heads, c_real - 1..c_real]);
             let decay = g_last.clone() / g_exp.clone();
             let d_k_hat = v_new.clone().matmul(d_state_acc.clone().swap_dims(2, 3));
             let d_k_bptt = d_k_hat.clone() * decay.clone();
@@ -231,19 +282,25 @@ where
             // E = exp(G), G = cumsum(g): d_G = d_E·E, d_g = reverse cumsum
             let mut d_e = d_e_rhsk + d_e_kg + d_e_qe + d_e_bke + d_e_decay;
             // E_last = E[c-1] receives the accumulated row adjoint
-            let cur_last = d_e.clone().slice([0..batch, 0..heads, c - 1..c]);
+            let cur_last = d_e
+                .clone()
+                .slice([0..batch, 0..heads, c_real - 1..c_real]);
             d_e = d_e.slice_assign(
-                [0..batch, 0..heads, c - 1..c, 0..k_dim],
+                [0..batch, 0..heads, c_real - 1..c_real, 0..k_dim],
                 cur_last + d_e_last,
             );
             let d_g_c = (d_e * g_exp.clone()).flip([2]).cumsum(2).flip([2]);
 
-            d_q_parts.push(d_q_c);
-            d_k_parts.push(d_k_bk + d_k_kg + d_k_bptt);
-            d_v_parts.push(d_v_c);
-            d_g_parts.push(d_g_c);
-            d_b_parts.push(d_b_c);
-            d_w_parts.push(d_w_c);
+            // the padded rows carry zero gradient; slice back to the real
+            // chunk length before concatenating
+            d_q_parts.push(d_q_c.slice([0..batch, 0..heads, 0..c_real]));
+            d_k_parts.push(
+                (d_k_bk + d_k_kg + d_k_bptt).slice([0..batch, 0..heads, 0..c_real]),
+            );
+            d_v_parts.push(d_v_c.slice([0..batch, 0..heads, 0..c_real]));
+            d_g_parts.push(d_g_c.slice([0..batch, 0..heads, 0..c_real]));
+            d_b_parts.push(d_b_c.slice([0..batch, 0..heads, 0..c_real]));
+            d_w_parts.push(d_w_c.slice([0..batch, 0..heads, 0..c_real]));
 
             // chunk 0 (the last processed, ci == 0) is the *input* state; its
             // state-input adjoint is the gradient of `s_in`. The adjoints of
