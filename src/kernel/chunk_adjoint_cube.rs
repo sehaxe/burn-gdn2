@@ -21,28 +21,28 @@ use cubecl::prelude::*;
 /// Token-parallel intra-chunk adjoint (BK1). One cube per chunk.
 #[cube(launch_unchecked)]
 fn gdn2_chunk_intra_adjoint_kernel<F: Float>(
-    d_out: &[F],    // [nblk, C, V]
-    v_new: &[F],    // [nblk, C, V]
-    qgt: &[F],      // [nblk, K, C]  qE transposed [k][r]
-    gexp: &[F],     // [nblk, C, K]
-    m_inv: &[F],    // [nblk, C, C]  M^-1 [row][col]
-    w_buf: &[F],    // [nblk, K, C]  W transposed
-    u_buf: &[F],    // [nblk, V, C]  U transposed
-    k_buf: &[F],    // [nblk, C, K]
-    b_buf: &[F],    // [nblk, C, K]
-    v_buf: &[F],    // [nblk, C, V]
-    wg_buf: &[F],   // [nblk, C, V]
-    s_before: &[F], // [nblk, K, V]
-    d_v_new: &[F],  // [nblk, C, V]  BK2 output (incl. BPTT part)
-    d_k_bptt: &[F], // [nblk, C, K]  BK2 output
-    d_e_bptt: &[F], // [nblk, C, K]  BK2 output (d_e_decay)
-    d_e_last: &[F], // [nblk, K]     BK2 output
-    d_q: &mut [F],  // [nblk, C, K]
-    d_k: &mut [F],  // [nblk, C, K]
-    d_b: &mut [F],  // [nblk, C, K]
-    d_g: &mut [F],  // [nblk, C, K]
-    d_v: &mut [F],  // [nblk, C, V]
-    d_w: &mut [F],  // [nblk, C, V]
+    d_out: &Array<F>,    // [nblk, C, V]
+    v_new: &Array<F>,    // [nblk, C, V]
+    qgt: &Array<F>,      // [nblk, K, C]  qE transposed [k][r]
+    gexp: &Array<F>,     // [nblk, C, K]
+    m_inv: &Array<F>,    // [nblk, C, C]  M^-1 [row][col]
+    w_buf: &Array<F>,    // [nblk, K, C]  W transposed
+    u_buf: &Array<F>,    // [nblk, V, C]  U transposed
+    k_buf: &Array<F>,    // [nblk, C, K]
+    b_buf: &Array<F>,    // [nblk, C, K]
+    v_buf: &Array<F>,    // [nblk, C, V]
+    wg_buf: &Array<F>,   // [nblk, C, V]
+    s_before: &Array<F>, // [nblk, K, V]
+    d_v_new: &Array<F>,  // [nblk, C, V]  BK2 output (incl. BPTT part)
+    d_k_bptt: &Array<F>, // [nblk, C, K]  BK2 output
+    d_e_bptt: &Array<F>, // [nblk, C, K]  BK2 output (d_e_decay)
+    d_e_last: &Array<F>, // [nblk, K]     BK2 output
+    d_q: &mut Array<F>,  // [nblk, C, K]
+    d_k: &mut Array<F>,  // [nblk, C, K]
+    d_b: &mut Array<F>,  // [nblk, C, K]
+    d_g: &mut Array<F>,  // [nblk, C, K]
+    d_v: &mut Array<F>,  // [nblk, C, V]
+    d_w: &mut Array<F>,  // [nblk, C, V]
     scale: f32,
     #[comptime] chunk_c: u32,
     #[comptime] k_dim: u32,
@@ -58,15 +58,15 @@ fn gdn2_chunk_intra_adjoint_kernel<F: Float>(
     let vb = block * c * vd;
     let sb = block * kd * vd;
 
-    let mut d_qk_sh = Shared::<[F]>::new_slice(c * c);
-    let mut d_w_sh = Shared::<[F]>::new_slice(c * kd);
-    let mut d_vn_sh = Shared::<[F]>::new_slice(c * vd);
-    let mut d_qe_sh = Shared::<[F]>::new_slice(c * kd);
-    let mut d_kg_sh = Shared::<[F]>::new_slice(c * kd);
-    let mut d_rhs_k_sh = Shared::<[F]>::new_slice(c * kd);
-    let mut d_rhs_v_sh = Shared::<[F]>::new_slice(c * vd);
-    let mut d_akk_sh = Shared::<[F]>::new_slice(c * c);
-    let mut d_e_sh = Shared::<[F]>::new_slice(c * kd);
+    let mut d_qk_sh = SharedMemory::<F>::new(c * c);
+    let mut d_w_sh = SharedMemory::<F>::new(c * kd);
+    let mut d_vn_sh = SharedMemory::<F>::new(c * vd);
+    let mut d_qe_sh = SharedMemory::<F>::new(c * kd);
+    let mut d_kg_sh = SharedMemory::<F>::new(c * kd);
+    let mut d_rhs_k_sh = SharedMemory::<F>::new(c * kd);
+    let mut d_rhs_v_sh = SharedMemory::<F>::new(c * vd);
+    let mut d_akk_sh = SharedMemory::<F>::new(c * c);
+    let mut d_e_sh = SharedMemory::<F>::new(c * kd);
 
     if r < c {
         // 1) d_qk row: d_aqk[r][s]·scale·causal, stage the full d_qk.
@@ -219,18 +219,18 @@ fn gdn2_chunk_intra_adjoint_kernel<F: Float>(
 /// state adjoint at chunk 0 as `d_s`.
 #[cube(launch_unchecked)]
 fn gdn2_chunk_inter_adjoint_kernel<F: Float>(
-    d_out: &[F],           // [nblk, C, V]
-    v_new: &[F],           // [nblk, C, V]
-    aqk: &[F],             // [nblk, C, C] transposed [s][r]
-    qgt: &[F],             // [nblk, K, C] qE transposed
-    w_buf: &[F],           // [nblk, K, C] W transposed
-    glast: &[F],           // [nblk, K]
-    gexp: &[F],            // [nblk, C, K]
-    k_buf: &[F],           // [nblk, C, K]
-    s_before: &[F],        // [nblk, K, V]
-    state_in: &[F],        // [bh, K, V] initial state adjoint (zeros)
-    d_v_new_out: &mut [F], // [nblk, C, V]
-    d_s: &mut [F],         // [nblk, K, V] state adjoint per chunk
+    d_out: &Array<F>,           // [nblk, C, V]
+    v_new: &Array<F>,           // [nblk, C, V]
+    aqk: &Array<F>,             // [nblk, C, C] transposed [s][r]
+    qgt: &Array<F>,             // [nblk, K, C] qE transposed
+    w_buf: &Array<F>,           // [nblk, K, C] W transposed
+    glast: &Array<F>,           // [nblk, K]
+    gexp: &Array<F>,            // [nblk, C, K]
+    k_buf: &Array<F>,           // [nblk, C, K]
+    s_before: &Array<F>,        // [nblk, K, V]
+    state_in: &Array<F>,        // [bh, K, V] initial state adjoint (zeros)
+    d_v_new_out: &mut Array<F>, // [nblk, C, V]
+    d_s: &mut Array<F>,         // [nblk, K, V] state adjoint per chunk
     scale: f32,
     nt: u32,
     #[comptime] chunk_c: u32,
@@ -248,8 +248,8 @@ fn gdn2_chunk_inter_adjoint_kernel<F: Float>(
     let vs = vt * vtile;
     let n_vp = 2;
 
-    let mut vn_sh = Shared::<[F]>::new_slice(c * vtile);
-    let mut d_sh = Shared::<[F]>::new_slice(kd * vtile);
+    let mut vn_sh = SharedMemory::<F>::new(c * vtile);
+    let mut d_sh = SharedMemory::<F>::new(kd * vtile);
 
     if r < c {
         // Load the initial state adjoint slice.
@@ -387,14 +387,14 @@ fn grp_id() -> u32 {
 #[cfg(feature = "cuda")]
 pub mod cuda {
     use super::*;
-    use burn::backend::{Backend, DispatchKindConversion};
-    use burn::tensor::{DispatchTensor, Tensor};
+    use burn::tensor::backend::Backend;
+    use burn::tensor::Tensor;
     use burn_cubecl::tensor::CubeTensor;
     use burn_cubecl::CubeBackend;
     use std::any::{Any, TypeId};
 
     /// The bare (non-fusion) CUDA backend the fused kernels target.
-    pub type CudaBare = CubeBackend<cubecl::cuda::CudaRuntime>;
+    pub type CudaBare = CubeBackend<cubecl::cuda::CudaRuntime, f32, i32, u8>;
 
     pub fn is_cuda<B: Backend>() -> bool {
         TypeId::of::<B>() == TypeId::of::<CudaBare>()
@@ -403,15 +403,12 @@ pub mod cuda {
     /// Owned copy of the underlying `CubeTensor` of `t`, if `B` is the bare
     /// CUDA `CubeBackend` and the buffer is row-major contiguous.
     fn cube_of<B: Backend, const D: usize>(
-        t: &Tensor<D>,
-    ) -> Option<CubeTensor<cubecl::cuda::CudaRuntime>>
-    where
-        DispatchTensor: DispatchKindConversion<B>,
-    {
+        t: &Tensor<B, D>,
+    ) -> Option<CubeTensor<cubecl::cuda::CudaRuntime>> {
         if !is_cuda::<B>() {
             return None;
         }
-        let prim = t.clone().try_into_primitive::<B>().ok()?;
+        let prim = t.clone().into_primitive().tensor();
         let cube = (&prim as &dyn Any).downcast_ref::<CubeTensor<cubecl::cuda::CudaRuntime>>()?;
         let shape = cube.meta.shape().dims::<D>();
         let strides = cube.meta.strides().to_vec();
@@ -428,36 +425,36 @@ pub mod cuda {
 
     /// Exported forward buffers consumed by the fused backward.
     #[derive(Clone, Debug)]
-    pub struct FusedBackwardInputs {
+    pub struct FusedBackwardInputs<B: Backend> {
         /// M^-1, `[nblk, c, c]`.
-        pub m_inv: Tensor<3>,
+        pub m_inv: Tensor<B, 3>,
         /// aqk (transposed `[s][r]`), `[nblk, c, c]`.
-        pub aqk: Tensor<3>,
+        pub aqk: Tensor<B, 3>,
         /// qE transposed `[k][r]`, `[nblk, k, c]`.
-        pub qgt: Tensor<3>,
+        pub qgt: Tensor<B, 3>,
         /// k·glast/E, `[nblk, c, k]`.
-        pub kgd: Tensor<3>,
+        pub kgd: Tensor<B, 3>,
         /// exp(cumsum(g)) last row, `[nblk, k]`.
-        pub glast: Tensor<2>,
+        pub glast: Tensor<B, 2>,
         /// v_new, `[nblk, c, v]`.
-        pub v_new: Tensor<3>,
+        pub v_new: Tensor<B, 3>,
         /// state before each chunk, `[nblk, k, v]`.
-        pub states: Tensor<3>,
+        pub states: Tensor<B, 3>,
         /// W transposed `[k][r]`, `[nblk, k, c]`.
-        pub w: Tensor<3>,
+        pub w: Tensor<B, 3>,
         /// U transposed `[v][r]`, `[nblk, v, c]`.
-        pub u: Tensor<3>,
+        pub u: Tensor<B, 3>,
     }
 
     /// Gradient tensors of the chunked forward, full sequence shape.
-    pub struct FusedBackwardOutput {
-        pub d_q: Tensor<4>,
-        pub d_k: Tensor<4>,
-        pub d_v: Tensor<4>,
-        pub d_g: Tensor<4>,
-        pub d_b: Tensor<4>,
-        pub d_w: Tensor<4>,
-        pub d_s: Tensor<4>,
+    pub struct FusedBackwardOutput<B: Backend> {
+        pub d_q: Tensor<B, 4>,
+        pub d_k: Tensor<B, 4>,
+        pub d_v: Tensor<B, 4>,
+        pub d_g: Tensor<B, 4>,
+        pub d_b: Tensor<B, 4>,
+        pub d_w: Tensor<B, 4>,
+        pub d_s: Tensor<B, 4>,
     }
 
     /// Run the fused backward. Returns `None` when the backend is not the
@@ -465,17 +462,15 @@ pub mod cuda {
     /// tensor-path adjoint.
     #[allow(clippy::too_many_arguments)]
     pub fn fused_chunk_backward<B: Backend>(
-        fwd: &FusedBackwardInputs,
-        k: &Tensor<4>,
-        v: &Tensor<4>,
-        b: &Tensor<4>,
-        wg: &Tensor<4>,
-        d_out: &Tensor<4>,
+        fwd: &FusedBackwardInputs<B>,
+        k: &Tensor<B, 4>,
+        v: &Tensor<B, 4>,
+        b: &Tensor<B, 4>,
+        wg: &Tensor<B, 4>,
+        d_out: &Tensor<B, 4>,
         scale: f64,
         chunk_size: usize,
-    ) -> Option<FusedBackwardOutput>
-    where
-        DispatchTensor: DispatchKindConversion<B>,
+    ) -> Option<FusedBackwardOutput<B>>
     {
         let [batch, heads, time, k_dim] = d_out.shape().dims::<4>();
         let v_dim = d_out.shape().dims::<4>()[3];
@@ -501,14 +496,14 @@ pub mod cuda {
         let client = m_inv_c.client.clone();
 
         // output buffers
-        let mk3 = |shape: [usize; 3]| -> Tensor<3> { Tensor::<3>::zeros(shape, &device) };
-        let mk4 = |shape: [usize; 4]| -> Tensor<4> { Tensor::<4>::zeros(shape, &device) };
+        let mk3 = |shape: [usize; 3]| -> Tensor<B, 3> { Tensor::<B, 3>::zeros(shape, &device) };
+        let mk4 = |shape: [usize; 4]| -> Tensor<B, 4> { Tensor::<B, 4>::zeros(shape, &device) };
         let d_v_new = mk3([nblk, c, v_dim]);
         let d_s_flat = mk3([nblk, k_dim, v_dim]);
 
         let d_k_bptt = mk3([nblk, c, k_dim]);
         let d_e_bptt = mk3([nblk, c, k_dim]);
-        let d_e_last = Tensor::<2>::empty([nblk, k_dim], &device);
+        let d_e_last = Tensor::<B, 2>::empty([nblk, k_dim], &device);
         let d_q = mk4([batch, heads, time, k_dim]);
         let d_k = mk4([batch, heads, time, k_dim]);
         let d_b = mk4([batch, heads, time, k_dim]);
@@ -529,7 +524,7 @@ pub mod cuda {
         let d_v_c = cube_of::<B, 4>(&d_v).expect("backend mismatch");
         let d_w_c = cube_of::<B, 4>(&d_w).expect("backend mismatch");
         let d_s_out_c = cube_of::<B, 4>(&d_s).expect("backend mismatch");
-        let state_in = Tensor::<3>::zeros([bh, k_dim, v_dim], &device);
+        let state_in = Tensor::<B, 3>::zeros([bh, k_dim, v_dim], &device);
         let state_in_c = cube_of::<B, 3>(&state_in).expect("backend mismatch");
 
         // E = k·glast/kgd (recover from the exports, once)
@@ -559,18 +554,18 @@ pub mod cuda {
                 &client,
                 cube_count,
                 cube_dim,
-                BufferArg::from_raw_parts(do_c.handle.clone(), nblk * c * v_dim),
-                BufferArg::from_raw_parts(v_new_c.handle.clone(), nblk * c * v_dim),
-                BufferArg::from_raw_parts(aqk_c.handle.clone(), nblk * c * c),
-                BufferArg::from_raw_parts(qgt_c.handle.clone(), nblk * k_dim * c),
-                BufferArg::from_raw_parts(w_c.handle.clone(), nblk * k_dim * c),
-                BufferArg::from_raw_parts(glast_c.handle.clone(), nblk * k_dim),
-                BufferArg::from_raw_parts(e_flat_c.handle.clone(), nblk * c * k_dim),
-                BufferArg::from_raw_parts(k_c.handle.clone(), nblk * c * k_dim),
-                BufferArg::from_raw_parts(states_c.handle.clone(), nblk * k_dim * v_dim),
-                BufferArg::from_raw_parts(state_in_c.handle, bh * k_dim * v_dim),
-                BufferArg::from_raw_parts(d_v_new_c.handle.clone(), nblk * c * v_dim),
-                BufferArg::from_raw_parts(d_s_c.handle.clone(), nblk * k_dim * v_dim),
+                ArrayArg::from_raw_parts(do_c.handle.clone(), nblk * c * v_dim),
+                ArrayArg::from_raw_parts(v_new_c.handle.clone(), nblk * c * v_dim),
+                ArrayArg::from_raw_parts(aqk_c.handle.clone(), nblk * c * c),
+                ArrayArg::from_raw_parts(qgt_c.handle.clone(), nblk * k_dim * c),
+                ArrayArg::from_raw_parts(w_c.handle.clone(), nblk * k_dim * c),
+                ArrayArg::from_raw_parts(glast_c.handle.clone(), nblk * k_dim),
+                ArrayArg::from_raw_parts(e_flat_c.handle.clone(), nblk * c * k_dim),
+                ArrayArg::from_raw_parts(k_c.handle.clone(), nblk * c * k_dim),
+                ArrayArg::from_raw_parts(states_c.handle.clone(), nblk * k_dim * v_dim),
+                ArrayArg::from_raw_parts(state_in_c.handle, bh * k_dim * v_dim),
+                ArrayArg::from_raw_parts(d_v_new_c.handle.clone(), nblk * c * v_dim),
+                ArrayArg::from_raw_parts(d_s_c.handle.clone(), nblk * k_dim * v_dim),
                 scale as f32,
                 nt as u32,
                 c as u32,
@@ -598,7 +593,7 @@ pub mod cuda {
                 d_s_r
                     .clone()
                     .slice([0..batch, 0..heads, 1..nt, 0..k_dim, 0..v_dim]),
-                Tensor::<5>::zeros([batch, heads, 1, k_dim, v_dim], &device),
+                Tensor::<B, 5>::zeros([batch, heads, 1, k_dim, v_dim], &device),
             ],
             2,
         );
@@ -662,28 +657,28 @@ pub mod cuda {
                 &client,
                 cube_count1,
                 cube_dim1,
-                BufferArg::from_raw_parts(do_c.handle.clone(), nblk * c * v_dim),
-                BufferArg::from_raw_parts(v_new_c.handle.clone(), nblk * c * v_dim),
-                BufferArg::from_raw_parts(qgt_c.handle.clone(), nblk * k_dim * c),
-                BufferArg::from_raw_parts(e_flat_c.handle.clone(), nblk * c * k_dim),
-                BufferArg::from_raw_parts(m_inv_c.handle.clone(), nblk * c * c),
-                BufferArg::from_raw_parts(w_c.handle, nblk * k_dim * c),
-                BufferArg::from_raw_parts(u_c.handle, nblk * v_dim * c),
-                BufferArg::from_raw_parts(k_c.handle, nblk * c * k_dim),
-                BufferArg::from_raw_parts(b_c.handle, nblk * c * k_dim),
-                BufferArg::from_raw_parts(v_c.handle, nblk * c * v_dim),
-                BufferArg::from_raw_parts(wg_c.handle, nblk * c * v_dim),
-                BufferArg::from_raw_parts(states_c.handle, nblk * k_dim * v_dim),
-                BufferArg::from_raw_parts(d_v_new_fresh_c.handle, nblk * c * v_dim),
-                BufferArg::from_raw_parts(d_k_bptt_c2.handle, nblk * c * k_dim),
-                BufferArg::from_raw_parts(d_e_bptt_c2.handle, nblk * c * k_dim),
-                BufferArg::from_raw_parts(d_e_last_c2.handle, nblk * k_dim),
-                BufferArg::from_raw_parts(d_q_c.handle, nblk * c * k_dim),
-                BufferArg::from_raw_parts(d_k_c.handle, nblk * c * k_dim),
-                BufferArg::from_raw_parts(d_b_c.handle, nblk * c * k_dim),
-                BufferArg::from_raw_parts(d_g_c.handle, nblk * c * k_dim),
-                BufferArg::from_raw_parts(d_v_c.handle, nblk * c * v_dim),
-                BufferArg::from_raw_parts(d_w_c.handle, nblk * c * v_dim),
+                ArrayArg::from_raw_parts(do_c.handle.clone(), nblk * c * v_dim),
+                ArrayArg::from_raw_parts(v_new_c.handle.clone(), nblk * c * v_dim),
+                ArrayArg::from_raw_parts(qgt_c.handle.clone(), nblk * k_dim * c),
+                ArrayArg::from_raw_parts(e_flat_c.handle.clone(), nblk * c * k_dim),
+                ArrayArg::from_raw_parts(m_inv_c.handle.clone(), nblk * c * c),
+                ArrayArg::from_raw_parts(w_c.handle, nblk * k_dim * c),
+                ArrayArg::from_raw_parts(u_c.handle, nblk * v_dim * c),
+                ArrayArg::from_raw_parts(k_c.handle, nblk * c * k_dim),
+                ArrayArg::from_raw_parts(b_c.handle, nblk * c * k_dim),
+                ArrayArg::from_raw_parts(v_c.handle, nblk * c * v_dim),
+                ArrayArg::from_raw_parts(wg_c.handle, nblk * c * v_dim),
+                ArrayArg::from_raw_parts(states_c.handle, nblk * k_dim * v_dim),
+                ArrayArg::from_raw_parts(d_v_new_fresh_c.handle, nblk * c * v_dim),
+                ArrayArg::from_raw_parts(d_k_bptt_c2.handle, nblk * c * k_dim),
+                ArrayArg::from_raw_parts(d_e_bptt_c2.handle, nblk * c * k_dim),
+                ArrayArg::from_raw_parts(d_e_last_c2.handle, nblk * k_dim),
+                ArrayArg::from_raw_parts(d_q_c.handle, nblk * c * k_dim),
+                ArrayArg::from_raw_parts(d_k_c.handle, nblk * c * k_dim),
+                ArrayArg::from_raw_parts(d_b_c.handle, nblk * c * k_dim),
+                ArrayArg::from_raw_parts(d_g_c.handle, nblk * c * k_dim),
+                ArrayArg::from_raw_parts(d_v_c.handle, nblk * c * v_dim),
+                ArrayArg::from_raw_parts(d_w_c.handle, nblk * c * v_dim),
                 scale as f32,
                 c as u32,
                 k_dim as u32,
