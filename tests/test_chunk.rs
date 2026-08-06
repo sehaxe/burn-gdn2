@@ -195,7 +195,6 @@ fn test_chunk_vs_reference() {
 #[test]
 #[cfg(feature = "binary-tests")]
 fn test_chunk_matches_fused_with_real_decay() {
-    use burn::backend::NdArray;
     use burn::tensor::Device;
     use burn::tensor::{Distribution, Tensor};
     use burn_gdn2::{chunk_wy_forward, fused_recurrent_forward};
