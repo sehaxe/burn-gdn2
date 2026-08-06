@@ -29,6 +29,12 @@ use crate::forward::{chunk_masks, chunk_wy_forward, chunk_wy_forward_impl};
 
 const N_PARENTS: usize = 7;
 
+/// Backward data saved by the fused forward kernels (CUDA only).
+#[cfg(feature = "cuda")]
+type FusedState = Option<crate::kernel::chunk_adjoint_cube::cuda::FusedBackwardInputs>;
+#[cfg(not(feature = "cuda"))]
+type FusedState = ();
+
 #[derive(Debug)]
 struct ChunkWy;
 
@@ -41,6 +47,7 @@ where
         f64,
         usize,
         crate::forward::ChunkWyScratch,
+        crate::autodiff::FusedState,
     );
 
     fn backward(
@@ -49,7 +56,7 @@ where
         grads: &mut Gradients,
         checkpointer: &mut Checkpointer,
     ) {
-        let (ids, scale, chunk_size, scratch) = ops.state;
+        let (ids, scale, chunk_size, scratch, fused_data) = ops.state;
         // q and g are not checkpointed: the scratch (always saved) carries
         // everything their values would contribute (qE, E), so the adjoint
         // never touches q or g. Keeping them out saves 2 full-sequence
@@ -71,6 +78,26 @@ where
             .expect("state is checkpointed");
 
         let d_out = Tensor::from_primitive::<B>(grads.consume::<B>(&ops.node));
+
+        #[cfg(feature = "cuda")]
+        if let Some(fwd) = fused_data {
+            use crate::kernel::chunk_adjoint_cube::cuda::{fused_chunk_backward, is_cuda};
+            if is_cuda::<B>() {
+                if let Some(out) =
+                    fused_chunk_backward::<B>(&fwd, &k, &v, &b, &w, &d_out, scale, chunk_size)
+                {
+                    let d_inputs = [
+                        out.d_q, out.d_k, out.d_v, out.d_g, out.d_b, out.d_w, out.d_s,
+                    ];
+                    for (i, grad) in d_inputs.into_iter().enumerate() {
+                        if let Some(node) = ops.parents[i].clone() {
+                            grads.register::<B>(node.id, grad.try_into_primitive::<B>().unwrap());
+                        }
+                    }
+                    return;
+                }
+            }
+        }
 
         let [batch, heads, time, k_dim] = k.shape().dims::<4>();
         let v_dim = v.shape().dims::<4>()[3];
@@ -353,7 +380,7 @@ where
     // instead of ~150; verified in tests/fused_chunk_verify.rs). The tensor
     // path returns its scratch so the backward can skip the recompute; the
     // fused path does not expose intermediates, so its backward recomputes.
-    let (out_t, new_state_t, scratch) = {
+    let (out_t, new_state_t, scratch, fused_data) = {
         #[cfg(feature = "cuda")]
         {
             use crate::kernel::chunk_cube::cuda::{fused_chunk_forward_scratch, is_cuda};
@@ -369,12 +396,25 @@ where
                     scale,
                     chunk_size,
                 ) {
-                    // Rebuild the minimal scratch from the exported kernel
-                    // buffers, so the backward never re-runs the forward.
-                    // The kernel stores aqk transposed ([s][r] = score(q_r,k_s))
-                    // and qgt as [k][c]; E is recovered from kgd = k·glast/E.
+                    // Keep the flat exports for the fused backward and
+                    // rebuild the minimal scratch from them (the backward
+                    // never re-runs the forward). The kernel stores aqk
+                    // transposed ([s][r] = score(q_r,k_s)) and qgt as [k][c];
+                    // E is recovered from kgd = k·glast/E.
+                    use crate::kernel::chunk_adjoint_cube::cuda::FusedBackwardInputs;
                     let [batch, heads, time, k_dim] = q_t.shape().dims::<4>();
                     let (nt, c) = (time / chunk_size, chunk_size);
+                    let fused_inputs = FusedBackwardInputs {
+                        m_inv: io.m_inv.clone(),
+                        aqk: io.aqk.clone(),
+                        qgt: io.qgt.clone(),
+                        kgd: io.kgd.clone(),
+                        glast: io.glast.clone(),
+                        v_new: io.v_new.clone(),
+                        states: io.states.clone(),
+                        w: io.w.clone(),
+                        u: io.u.clone(),
+                    };
                     let aqk_t = io
                         .aqk
                         .reshape([batch, heads, nt, c, c])
@@ -413,25 +453,30 @@ where
                                 .reshape([batch, heads, c, c]),
                         })
                         .collect();
-                    (o, ns, Some(crate::forward::ChunkWyScratch { chunks }))
+                    (
+                        o,
+                        ns,
+                        Some(crate::forward::ChunkWyScratch { chunks }),
+                        Some(fused_inputs),
+                    )
                 } else {
                     let (o, ns, sc) = chunk_wy_forward_impl(
                         q_t, k_t, v_t, g_t, b_t, w_t, s_t, scale, chunk_size, None,
                     );
-                    (o, ns, Some(sc))
+                    (o, ns, Some(sc), None)
                 }
             } else {
                 let (o, ns, sc) = chunk_wy_forward_impl(
                     q_t, k_t, v_t, g_t, b_t, w_t, s_t, scale, chunk_size, None,
                 );
-                (o, ns, Some(sc))
+                (o, ns, Some(sc), None)
             }
         }
         #[cfg(not(feature = "cuda"))]
         {
             let (o, ns, sc) =
                 chunk_wy_forward_impl(q_t, k_t, v_t, g_t, b_t, w_t, s_t, scale, chunk_size, None);
-            (o, ns, Some(sc))
+            (o, ns, Some(sc), None)
         }
     };
     let out_prim = out_t.try_into_primitive::<Inner>().unwrap();
@@ -465,6 +510,7 @@ where
                     scale,
                     chunk_size,
                     scratch.expect("chunk forward always produces a scratch"),
+                    fused_data,
                 ),
                 out_prim,
             );

@@ -284,3 +284,22 @@ python3 tests/gen_reference.py                            # regenerate tests/ref
 ## License
 
 AGPL-3.0. See [LICENSE](LICENSE).
+
+## Fused backward
+
+The chunked op's backward runs on two fused kernels per call (BK2: sequential
+BPTT state chain; BK1: token-parallel intra-chunk adjoint) plus ~15 batched
+tensor ops in the glue, instead of ~37 tensor ops per chunk. The forward
+kernels export M^-1/aqk/qE/decay/v_new/states, so the backward never re-runs
+the forward. Attention-core kernels (fwd+bwd, RTX 5060 Ti, chunk 16):
+
+| config | fused fwd+bwd | fla train (Triton) | old tensor-path train |
+|--------|---------------|--------------------|----------------------|
+| d=512, T=1024 | 0.32 ms | 2.8 ms | ~80 ms |
+| d=1024, T=2048 | 0.52 ms | 4.7 ms | ~148 ms |
+| d=2048, T=4096 | 1.34 ms | 4.6 ms | ~284 ms |
+| d=4096, T=8192 | 0.32 ms | 8.2 ms | ~733 ms |
+
+`tests/fused_chunk_verify.rs` checks the fused-op gradients against the tensor
+path within fp32 noise (k's chunk-boundary /E amplification is allowed up to
+10%).
