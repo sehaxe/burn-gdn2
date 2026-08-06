@@ -4,8 +4,8 @@
 
 use burn::backend::{Backend, NdArray};
 use burn::tensor::{Device, Distribution, Tensor};
-use burn_gdn2::{chunk_wy_forward, CudaBare};
 use burn_gdn2::kernel::chunk_cube::cuda::fused_chunk_forward;
+use burn_gdn2::{chunk_wy_forward, CudaBare};
 
 fn max_rel(a: &Tensor<4>, b: &Tensor<4>) -> f32 {
     let a = a.clone().into_data();
@@ -33,20 +33,64 @@ fn fused_chunk_matches_tensor_path() {
         (2, 8, 2048, 64, 64, 16),
         (1, 8, 4096, 128, 128, 16),
     ] {
-        let q = Tensor::<4>::random([batch, heads, time, k_dim], Distribution::Normal(0.0, 0.1), &dev);
-        let k = Tensor::<4>::random([batch, heads, time, k_dim], Distribution::Normal(0.0, 0.1), &dev);
-        let v = Tensor::<4>::random([batch, heads, time, v_dim], Distribution::Normal(0.0, 0.1), &dev);
-        let g = Tensor::<4>::random([batch, heads, time, k_dim], Distribution::Normal(-0.05, 0.1), &dev);
-        let b = Tensor::<4>::random([batch, heads, time, k_dim], Distribution::Uniform(0.0, 0.1), &dev);
-        let w = Tensor::<4>::random([batch, heads, time, v_dim], Distribution::Uniform(0.0, 0.1), &dev);
-        let s = Tensor::<4>::random([batch, heads, k_dim, v_dim], Distribution::Normal(0.0, 0.1), &dev);
+        let q = Tensor::<4>::random(
+            [batch, heads, time, k_dim],
+            Distribution::Normal(0.0, 0.1),
+            &dev,
+        );
+        let k = Tensor::<4>::random(
+            [batch, heads, time, k_dim],
+            Distribution::Normal(0.0, 0.1),
+            &dev,
+        );
+        let v = Tensor::<4>::random(
+            [batch, heads, time, v_dim],
+            Distribution::Normal(0.0, 0.1),
+            &dev,
+        );
+        let g = Tensor::<4>::random(
+            [batch, heads, time, k_dim],
+            Distribution::Normal(-0.05, 0.1),
+            &dev,
+        );
+        let b = Tensor::<4>::random(
+            [batch, heads, time, k_dim],
+            Distribution::Uniform(0.0, 0.1),
+            &dev,
+        );
+        let w = Tensor::<4>::random(
+            [batch, heads, time, v_dim],
+            Distribution::Uniform(0.0, 0.1),
+            &dev,
+        );
+        let s = Tensor::<4>::random(
+            [batch, heads, k_dim, v_dim],
+            Distribution::Normal(0.0, 0.1),
+            &dev,
+        );
         let scale = (k_dim as f64).powf(-0.5);
 
         let (ref_out, ref_s) = chunk_wy_forward(
-            q.clone(), k.clone(), v.clone(), g.clone(), b.clone(), w.clone(), s.clone(), scale, cs,
+            q.clone(),
+            k.clone(),
+            v.clone(),
+            g.clone(),
+            b.clone(),
+            w.clone(),
+            s.clone(),
+            scale,
+            cs,
         );
         let (f_out, f_s) = fused_chunk_forward::<B>(
-            q.clone(), k.clone(), v.clone(), g.clone(), b.clone(), w.clone(), s.clone(), scale, cs,
+            q.clone(),
+            k.clone(),
+            v.clone(),
+            g.clone(),
+            b.clone(),
+            w.clone(),
+            s.clone(),
+            scale,
+            cs,
         )
         .expect("fused path should dispatch");
 
@@ -68,9 +112,12 @@ fn fused_op_grads_match_tensor_path_cuda() {
     use burn::tensor::Device as D;
     let plain: D = Default::default();
     let dev = burn::tensor::Device::autodiff(plain);
-    let (batch, heads, time, k_dim, v_dim, cs) = (1usize, 2usize, 128usize, 32usize, 32usize, 16usize);
+    let (batch, heads, time, k_dim, v_dim, cs) =
+        (1usize, 2usize, 128usize, 32usize, 32usize, 16usize);
     let scale = (k_dim as f64).powf(-0.5);
-    let mk = |shape: [usize; 4], dist: Distribution| Tensor::<4>::random(shape, dist, &dev).require_grad();
+    let mk = |shape: [usize; 4], dist: Distribution| {
+        Tensor::<4>::random(shape, dist, &dev).require_grad()
+    };
     let q = mk([batch, heads, time, k_dim], Distribution::Normal(0.0, 0.1));
     let k = mk([batch, heads, time, k_dim], Distribution::Normal(0.0, 0.1));
     let v = mk([batch, heads, time, v_dim], Distribution::Normal(0.0, 0.1));
@@ -80,16 +127,40 @@ fn fused_op_grads_match_tensor_path_cuda() {
     let s = mk([batch, heads, k_dim, v_dim], Distribution::Normal(0.0, 0.1));
 
     let (out, _) = chunk_wy_forward(
-        q.clone(), k.clone(), v.clone(), g.clone(), b.clone(), w.clone(), s.clone(), scale, cs,
+        q.clone(),
+        k.clone(),
+        v.clone(),
+        g.clone(),
+        b.clone(),
+        w.clone(),
+        s.clone(),
+        scale,
+        cs,
     );
     let grads_ref = out.powf_scalar(2.0).sum().backward();
     let (out2, _) = burn_gdn2::chunk_wy_forward_autodiff::<CudaBare>(
-        q.clone(), k.clone(), v.clone(), g.clone(), b.clone(), w.clone(), s.clone(), scale, cs,
+        q.clone(),
+        k.clone(),
+        v.clone(),
+        g.clone(),
+        b.clone(),
+        w.clone(),
+        s.clone(),
+        scale,
+        cs,
     )
     .expect("op should dispatch");
     let grads_f = out2.powf_scalar(2.0).sum().backward();
 
-    for (name, t) in [("q", &q), ("k", &k), ("v", &v), ("g", &g), ("b", &b), ("w", &w), ("s", &s)] {
+    for (name, t) in [
+        ("q", &q),
+        ("k", &k),
+        ("v", &v),
+        ("g", &g),
+        ("b", &b),
+        ("w", &w),
+        ("s", &s),
+    ] {
         let gr = t.grad(&grads_ref).unwrap().clone();
         let gf = t.grad(&grads_f).unwrap().clone();
         let a = gr.clone().into_data();

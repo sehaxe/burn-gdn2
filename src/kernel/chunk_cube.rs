@@ -26,24 +26,24 @@ use cubecl::prelude::*;
 #[allow(clippy::manual_div_ceil)] // cubecl can't expand `.div_ceil()` on runtime values
 #[cube(launch_unchecked)]
 fn gdn2_chunk_intra_kernel<F: Float>(
-    q: &[F],         // [BH*NT, C, K]
-    k: &[F],         // [BH*NT, C, K]
-    g: &[F],         // [BH*NT, C, K]
-    b: &[F],         // [BH*NT, C, K]
-    v: &[F],         // [BH*NT, C, V]
-    wg: &[F],        // [BH*NT, C, V]
-    gexp: &mut [F],  // [BH*NT, C, K]  exp(chunk-local cumulative g)
-    kgt: &mut [F],   // [BH*NT, K, C]  k / g_exp, transposed
-    qgt: &mut [F],   // [BH*NT, K, C]  q ⊙ g_exp, transposed
-    bkt: &mut [F],   // [BH*NT, K, C]  b ⊙ k ⊙ g_exp, transposed
-    wvt: &mut [F],   // [BH*NT, V, C]  w_gate ⊙ v, transposed
-    aqk: &mut [F],   // [BH*NT, C, C]  causal, scaled
-    akk: &mut [F],   // [BH*NT, C, C]  strict lower (the T matrix)
+    q: &[F],             // [BH*NT, C, K]
+    k: &[F],             // [BH*NT, C, K]
+    g: &[F],             // [BH*NT, C, K]
+    b: &[F],             // [BH*NT, C, K]
+    v: &[F],             // [BH*NT, C, V]
+    wg: &[F],            // [BH*NT, C, V]
+    gexp: &mut [F],      // [BH*NT, C, K]  exp(chunk-local cumulative g)
+    kgt: &mut [F],       // [BH*NT, K, C]  k / g_exp, transposed
+    qgt: &mut [F],       // [BH*NT, K, C]  q ⊙ g_exp, transposed
+    bkt: &mut [F],       // [BH*NT, K, C]  b ⊙ k ⊙ g_exp, transposed
+    wvt: &mut [F],       // [BH*NT, V, C]  w_gate ⊙ v, transposed
+    aqk: &mut [F],       // [BH*NT, C, C]  causal, scaled
+    akk: &mut [F],       // [BH*NT, C, C]  strict lower (the T matrix)
     m_inv_out: &mut [F], // [BH*NT, C, C]  A = (I + T)^-1 (exported for backward)
-    w: &mut [F],     // [BH*NT, C, K]  pseudo-key  = A @ (b⊙k⊙g_exp)
-    u: &mut [F],     // [BH*NT, C, V]  pseudo-value = A @ (w_gate⊙v)
-    kgd: &mut [F],   // [BH*NT, C, K]  k ⊙ g_exp[last] / g_exp
-    glast: &mut [F], // [BH*NT, K]     g_exp[last row]
+    w: &mut [F],         // [BH*NT, C, K]  pseudo-key  = A @ (b⊙k⊙g_exp)
+    u: &mut [F],         // [BH*NT, C, V]  pseudo-value = A @ (w_gate⊙v)
+    kgd: &mut [F],       // [BH*NT, C, K]  k ⊙ g_exp[last] / g_exp
+    glast: &mut [F],     // [BH*NT, K]     g_exp[last row]
     scale: f32,
     #[comptime] chunk_c: u32,
     #[comptime] k_dim: u32,
@@ -861,10 +861,8 @@ pub mod cuda {
     where
         DispatchTensor: DispatchKindConversion<B>,
     {
-        fused_chunk_forward_scratch::<B>(
-            q, k, v, g, b, w, state, scale, chunk_size,
-        )
-        .map(|(out, state, _io)| (out, state))
+        fused_chunk_forward_scratch::<B>(q, k, v, g, b, w, state, scale, chunk_size)
+            .map(|(out, state, _io)| (out, state))
     }
 
     /// Inter kernel only, with a tunable `vtile`/`y_dim` (diagnostics).

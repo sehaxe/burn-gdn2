@@ -103,7 +103,10 @@ pub fn chunk_wy_forward_impl(
         if cc == c_pad {
             t
         } else {
-            Tensor::cat(vec![t, Tensor::zeros([batch, heads, c_pad - cc, d], &device)], 2)
+            Tensor::cat(
+                vec![t, Tensor::zeros([batch, heads, c_pad - cc, d], &device)],
+                2,
+            )
         }
     };
 
@@ -134,8 +137,7 @@ pub fn chunk_wy_forward_impl(
             .slice([0..batch, 0..heads, chunk_start..chunk_end]);
 
         // scores / rhs / decay, with the effective (possibly padded) length
-        let (aqk, akk, gamma, g_cumsum, q_gated, rhs_k, rhs_v, k_upd, c_eff, m_eye) = if c <= TILE
-        {
+        let (aqk, akk, gamma, g_cumsum, q_gated, rhs_k, rhs_v, k_upd, c_eff, m_eye) = if c <= TILE {
             let (scale_causal, strict_mask) = if c == chunk_size {
                 (scale_causal_full.clone(), strict_full.clone())
             } else {
@@ -155,22 +157,13 @@ pub fn chunk_wy_forward_impl(
             let aqk = (q_c.clone() * g_exp.clone()).matmul(k_over_gamma.clone().swap_dims(2, 3))
                 * scale_causal;
             let bk = b_c.clone() * k_c.clone();
-            let akk = (bk.clone() * g_exp.clone()).matmul(k_over_gamma.swap_dims(2, 3))
-                * strict_mask;
+            let akk =
+                (bk.clone() * g_exp.clone()).matmul(k_over_gamma.swap_dims(2, 3)) * strict_mask;
             let rhs_k = bk * g_exp.clone();
             let rhs_v = w_c * v_c;
             let q_gated = q_c.clone() * g_exp.clone();
             (
-                aqk,
-                akk,
-                g_exp,
-                g_cumsum,
-                q_gated,
-                rhs_k,
-                rhs_v,
-                k_c,
-                c,
-                m_eye,
+                aqk, akk, g_exp, g_cumsum, q_gated, rhs_k, rhs_v, k_c, c, m_eye,
             )
         } else {
             let c_pad = c.div_ceil(TILE) * TILE;
@@ -198,7 +191,7 @@ pub fn chunk_wy_forward_impl(
 
             // full cumulative log-decay over the (padded) chunk
             let g_cumsum = g_p.clone().cumsum(2); // [B,H,c_pad,k]
-            // exclusive prefix of tile sums: decay accumulated before each tile
+                                                  // exclusive prefix of tile sums: decay accumulated before each tile
             let g_bound_prev = g_cumsum
                 .clone()
                 .reshape([batch, heads, n_t, TILE, k_dim])
@@ -246,7 +239,9 @@ pub fn chunk_wy_forward_impl(
                 let q_k = q_p.clone().slice([0..batch, 0..heads, 0..c_pad, k..k + 1]);
                 let k_k = k_p.clone().slice([0..batch, 0..heads, 0..c_pad, k..k + 1]);
                 let b_k = b_p.clone().slice([0..batch, 0..heads, 0..c_pad, k..k + 1]);
-                let g_k = g_rel_exp.clone().slice([0..batch, 0..heads, 0..c_pad, k..k + 1]);
+                let g_k = g_rel_exp
+                    .clone()
+                    .slice([0..batch, 0..heads, 0..c_pad, k..k + 1]);
                 let e_k = e_block(k);
                 let kg = k_k.clone() / g_k.clone();
                 aqk = aqk + (q_k * g_k.clone()).matmul(kg.clone().swap_dims(2, 3)) * e_k.clone();
@@ -317,11 +312,16 @@ pub fn chunk_wy_forward_impl(
         // state update in log-space differences: decay = exp(G_last - G_t) <= 1
         let g_last_log = g_cumsum.clone().slice([0..batch, 0..heads, c - 1..c]);
         let decay_last = (g_last_log - g_cumsum).exp();
-        state = state * g_last.swap_dims(2, 3)
-            + (k_upd * decay_last).swap_dims(2, 3).matmul(v_new);
+        state = state * g_last.swap_dims(2, 3) + (k_upd * decay_last).swap_dims(2, 3).matmul(v_new);
     }
 
-    (Tensor::cat(outputs, 2), state, ChunkWyScratch { chunks: scratch.chunks })
+    (
+        Tensor::cat(outputs, 2),
+        state,
+        ChunkWyScratch {
+            chunks: scratch.chunks,
+        },
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

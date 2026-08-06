@@ -7,10 +7,10 @@ use burn::module::Param;
 use burn::nn::{Linear, LinearConfig};
 use burn::tensor::Device;
 use burn::tensor::{Tensor, TensorData};
-#[cfg(feature = "binary-tests")]
-use burn_gdn2::{GatedDeltaNet2, Gdn2Config, Gdn2Mode, Gdn2State};
 #[cfg(not(feature = "binary-tests"))]
 use burn_gdn2::{GatedDeltaNet2, Gdn2Config, Gdn2Mode};
+#[cfg(feature = "binary-tests")]
+use burn_gdn2::{GatedDeltaNet2, Gdn2Config, Gdn2Mode, Gdn2State};
 
 const EPSILON: f32 = 5e-4;
 

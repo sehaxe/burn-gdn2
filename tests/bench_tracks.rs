@@ -2,13 +2,15 @@
 //! Two-track comparison: tensor ops vs tensor ops, fused kernels vs kernels.
 use burn::backend::Autodiff;
 use burn::tensor::{Distribution, Tensor};
-use burn_gdn2::{chunk_wy_forward, GatedDeltaNet2, Gdn2Config, Gdn2Mode, CudaBare};
+use burn_gdn2::{chunk_wy_forward, CudaBare, GatedDeltaNet2, Gdn2Config, Gdn2Mode};
 
 type AD = Autodiff<CudaBare>;
 
 fn time_it(runs: usize, mut f: impl FnMut()) -> f64 {
     let t0 = std::time::Instant::now();
-    for _ in 0..runs { f(); }
+    for _ in 0..runs {
+        f();
+    }
     t0.elapsed().as_secs_f64() / runs as f64
 }
 
@@ -17,7 +19,10 @@ fn time_it(runs: usize, mut f: impl FnMut()) -> f64 {
 fn bench_tracks() {
     let plain: burn::tensor::Device = Default::default();
     let ad_dev = burn::tensor::Device::autodiff(plain.clone());
-    println!("{:<16} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>8}", "config", "b_ops_f", "b_krn_f", "t_ops_f", "t_scan_f", "b_ops_t", "b_krn_t", "tok/s");
+    println!(
+        "{:<16} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>8}",
+        "config", "b_ops_f", "b_krn_f", "t_ops_f", "t_scan_f", "b_ops_t", "b_krn_t", "tok/s"
+    );
 
     for (d, h, hk, t) in [
         (256usize, 4usize, 64usize, 256usize),
@@ -25,7 +30,14 @@ fn bench_tracks() {
         (1024, 8, 128, 2048),
         (2048, 16, 128, 4096),
     ] {
-        let cfg = Gdn2Config { hidden_size: d, num_heads: h, head_dim: hk, mode: Gdn2Mode::Chunk, chunk_size: 64, ..Default::default() };
+        let cfg = Gdn2Config {
+            hidden_size: d,
+            num_heads: h,
+            head_dim: hk,
+            mode: Gdn2Mode::Chunk,
+            chunk_size: 64,
+            ..Default::default()
+        };
         let m = GatedDeltaNet2::new(&cfg, &plain);
         let m_ad = GatedDeltaNet2::new(&cfg, &ad_dev);
         let x = Tensor::<3>::random([1, t, d], Distribution::Normal(0.0, 1.0), &plain);
@@ -38,11 +50,35 @@ fn bench_tracks() {
         let s = Tensor::<4>::zeros([1, h, hk, hk], &plain);
         let scale = (hk as f64).powf(-0.5);
         // warmup: kernel JIT per config (comptime dims)
-        let _ = chunk_wy_forward(q.clone(), k.clone(), v.clone(), g.clone(), b.clone(), w.clone(), s.clone(), scale, 64).0.into_data();
+        let _ = chunk_wy_forward(
+            q.clone(),
+            k.clone(),
+            v.clone(),
+            g.clone(),
+            b.clone(),
+            w.clone(),
+            s.clone(),
+            scale,
+            64,
+        )
+        .0
+        .into_data();
         let _ = m.forward_train::<CudaBare>(x.clone()).into_data();
         let runs = if t <= 1024 { 5 } else { 3 };
         let t_ops_f = time_it(runs, || {
-            let _ = chunk_wy_forward(q.clone(), k.clone(), v.clone(), g.clone(), b.clone(), w.clone(), s.clone(), scale, 64).0.into_data();
+            let _ = chunk_wy_forward(
+                q.clone(),
+                k.clone(),
+                v.clone(),
+                g.clone(),
+                b.clone(),
+                w.clone(),
+                s.clone(),
+                scale,
+                64,
+            )
+            .0
+            .into_data();
         });
         // track 2: fused kernels (module path)
         let t_krn_f = time_it(runs, || {
@@ -51,14 +87,20 @@ fn bench_tracks() {
         // track 3: burn train tensor path (tracked autodiff)
         let _ = m_ad.forward_train::<AD>(x_ad.clone());
         let t_ops_t = time_it(runs, || {
-            let loss = m_ad.forward_train::<AD>(x_ad.clone()).powf_scalar(2.0).mean();
+            let loss = m_ad
+                .forward_train::<AD>(x_ad.clone())
+                .powf_scalar(2.0)
+                .mean();
             let _ = loss.clone().into_data();
             let _g = loss.backward();
         });
         // track 4: burn train fused op
         let _ = m_ad.forward_train_fused::<AD>(x_ad.clone());
         let t_krn_t = time_it(runs, || {
-            let loss = m_ad.forward_train_fused::<AD>(x_ad.clone()).powf_scalar(2.0).mean();
+            let loss = m_ad
+                .forward_train_fused::<AD>(x_ad.clone())
+                .powf_scalar(2.0)
+                .mean();
             let _ = loss.clone().into_data();
             let _g = loss.backward();
         });
@@ -73,8 +115,13 @@ fn bench_tracks() {
         println!(
             "{:<16} {:>10.1} {:>10.2} {:>10.1} {:>10.1} {:>10.1} {:>10.1} {:>6.0}",
             format!("d={d}, T={t}"),
-            t_ops_f * 1e3, t_krn_f * 1e3, t_ops_f_t * 1e3, t_scan_f_t * 1e3,
-            t_ops_t * 1e3, t_krn_t * 1e3, t as f64 / t_krn_t,
+            t_ops_f * 1e3,
+            t_krn_f * 1e3,
+            t_ops_f_t * 1e3,
+            t_scan_f_t * 1e3,
+            t_ops_t * 1e3,
+            t_krn_t * 1e3,
+            t as f64 / t_krn_t,
         );
     }
 }

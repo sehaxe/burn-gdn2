@@ -1,9 +1,9 @@
 #[test]
 #[cfg(feature = "binary-tests")]
 fn test_chunk_vs_reference() {
+    use burn::backend::NdArray;
     use burn::module::Param;
     use burn::nn::{Linear, LinearConfig};
-    use burn::backend::NdArray;
     use burn::tensor::Device;
     use burn::tensor::{Tensor, TensorData};
     use burn_gdn2::{GatedDeltaNet2, Gdn2Config, Gdn2Mode, Gdn2State};
@@ -148,10 +148,8 @@ fn test_chunk_vs_reference() {
         for i in 0..n_cases {
             let (in_shape, in_data) = read_raw_f32_tensor(&mut c);
             let (out_shape, out_data) = read_raw_f32_tensor(&mut c);
-            let input =
-                Tensor::<3>::from_data(TensorData::new(in_data, in_shape), &device);
-            let ref_out =
-                Tensor::<3>::from_data(TensorData::new(out_data, out_shape), &device);
+            let input = Tensor::<3>::from_data(TensorData::new(in_data, in_shape), &device);
+            let ref_out = Tensor::<3>::from_data(TensorData::new(out_data, out_shape), &device);
             let mut state: Option<Gdn2State> = None;
             let output = module.forward::<NdArray>(input, &mut state, true);
             let out_bytes: Vec<f32> = output
@@ -211,19 +209,14 @@ fn test_chunk_matches_fused_with_real_decay() {
     // must match the fused recurrence to ~1e-4.
     // Note: keys must be L2-normalized (as the module does) or the delta-rule
     // operator (I - (b*k)k^T) is unstable for raw Gaussian keys.
-    let g =
-        Tensor::<4>::random([b, h, t, k], Distribution::Uniform(-0.15, -0.01), &device);
+    let g = Tensor::<4>::random([b, h, t, k], Distribution::Uniform(-0.15, -0.01), &device);
     let q = Tensor::<4>::random([b, h, t, k], Distribution::Normal(0.0, 1.0), &device);
-    let kt_raw =
-        Tensor::<4>::random([b, h, t, k], Distribution::Normal(0.0, 1.0), &device);
+    let kt_raw = Tensor::<4>::random([b, h, t, k], Distribution::Normal(0.0, 1.0), &device);
     let kt = kt_raw.clone() / kt_raw.powf_scalar(2.0).sum_dim(3).sqrt();
     let v = Tensor::<4>::random([b, h, t, vd], Distribution::Normal(0.0, 1.0), &device);
-    let erase =
-        Tensor::<4>::random([b, h, t, k], Distribution::Uniform(0.0, 1.0), &device);
-    let write =
-        Tensor::<4>::random([b, h, t, vd], Distribution::Normal(0.0, 1.0), &device);
-    let state =
-        Tensor::<4>::random([b, h, k, vd], Distribution::Normal(0.0, 1.0), &device);
+    let erase = Tensor::<4>::random([b, h, t, k], Distribution::Uniform(0.0, 1.0), &device);
+    let write = Tensor::<4>::random([b, h, t, vd], Distribution::Normal(0.0, 1.0), &device);
+    let state = Tensor::<4>::random([b, h, k, vd], Distribution::Normal(0.0, 1.0), &device);
 
     let (chunk_out, chunk_state) = chunk_wy_forward(
         q.clone(),

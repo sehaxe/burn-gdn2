@@ -22,11 +22,7 @@ fn rel_diff(a: Tensor<4>, b: Tensor<4>) -> f32 {
     let b = b.into_data();
     let mut max_abs = 0.0f32;
     let mut scale = 0.0f32;
-    for (x, y) in a
-        .bytes
-        .chunks_exact(4)
-        .zip(b.bytes.chunks_exact(4))
-    {
+    for (x, y) in a.bytes.chunks_exact(4).zip(b.bytes.chunks_exact(4)) {
         let x = f32::from_le_bytes(x.try_into().unwrap());
         let y = f32::from_le_bytes(y.try_into().unwrap());
         max_abs = max_abs.max((x - y).abs());
@@ -45,24 +41,55 @@ fn inputs(
     v_dim: usize,
 ) -> [Tensor<4>; 7] {
     [
-        Tensor::<4>::random([batch, heads, time, k_dim], Distribution::Normal(0.0, 0.1), device).require_grad(),
-        Tensor::<4>::random([batch, heads, time, k_dim], Distribution::Normal(0.0, 0.1), device).require_grad(),
-        Tensor::<4>::random([batch, heads, time, v_dim], Distribution::Normal(0.0, 0.1), device).require_grad(),
+        Tensor::<4>::random(
+            [batch, heads, time, k_dim],
+            Distribution::Normal(0.0, 0.1),
+            device,
+        )
+        .require_grad(),
+        Tensor::<4>::random(
+            [batch, heads, time, k_dim],
+            Distribution::Normal(0.0, 0.1),
+            device,
+        )
+        .require_grad(),
+        Tensor::<4>::random(
+            [batch, heads, time, v_dim],
+            Distribution::Normal(0.0, 0.1),
+            device,
+        )
+        .require_grad(),
         // negative gates (decay), like the model produces
-        Tensor::<4>::random([batch, heads, time, k_dim], Distribution::Normal(-0.5, 0.1), device).require_grad(),
-        Tensor::<4>::random([batch, heads, time, k_dim], Distribution::Uniform(0.0, 0.1), device).require_grad(),
-        Tensor::<4>::random([batch, heads, time, v_dim], Distribution::Uniform(0.0, 0.1), device).require_grad(),
-        Tensor::<4>::random([batch, heads, k_dim, v_dim], Distribution::Normal(0.0, 0.1), device).require_grad(),
+        Tensor::<4>::random(
+            [batch, heads, time, k_dim],
+            Distribution::Normal(-0.5, 0.1),
+            device,
+        )
+        .require_grad(),
+        Tensor::<4>::random(
+            [batch, heads, time, k_dim],
+            Distribution::Uniform(0.0, 0.1),
+            device,
+        )
+        .require_grad(),
+        Tensor::<4>::random(
+            [batch, heads, time, v_dim],
+            Distribution::Uniform(0.0, 0.1),
+            device,
+        )
+        .require_grad(),
+        Tensor::<4>::random(
+            [batch, heads, k_dim, v_dim],
+            Distribution::Normal(0.0, 0.1),
+            device,
+        )
+        .require_grad(),
     ]
 }
 
 fn grads(t: &[Tensor<4>; 7], g: &burn::tensor::Gradients) -> Vec<Tensor<4>> {
     t.iter()
-        .map(|t| {
-            t.grad(g)
-                .unwrap_or_else(|| panic!("missing grad"))
-                .clone()
-        })
+        .map(|t| t.grad(g).unwrap_or_else(|| panic!("missing grad")).clone())
         .collect()
 }
 
@@ -243,13 +270,41 @@ fn fused_grads_match_finite_difference() {
                 &device,
             );
             let (o, _s) = chunk_wy_forward(
-                if i == 0 { perturbed.clone() } else { detached[0].clone() },
-                if i == 1 { perturbed.clone() } else { detached[1].clone() },
-                if i == 2 { perturbed.clone() } else { detached[2].clone() },
-                if i == 3 { perturbed.clone() } else { detached[3].clone() },
-                if i == 4 { perturbed.clone() } else { detached[4].clone() },
-                if i == 5 { perturbed.clone() } else { detached[5].clone() },
-                if i == 6 { perturbed.clone() } else { detached[6].clone() },
+                if i == 0 {
+                    perturbed.clone()
+                } else {
+                    detached[0].clone()
+                },
+                if i == 1 {
+                    perturbed.clone()
+                } else {
+                    detached[1].clone()
+                },
+                if i == 2 {
+                    perturbed.clone()
+                } else {
+                    detached[2].clone()
+                },
+                if i == 3 {
+                    perturbed.clone()
+                } else {
+                    detached[3].clone()
+                },
+                if i == 4 {
+                    perturbed.clone()
+                } else {
+                    detached[4].clone()
+                },
+                if i == 5 {
+                    perturbed.clone()
+                } else {
+                    detached[5].clone()
+                },
+                if i == 6 {
+                    perturbed.clone()
+                } else {
+                    detached[6].clone()
+                },
                 scale,
                 chunk_size,
             );
@@ -302,8 +357,16 @@ fn model_fused_train_grads_match_plain() {
         ("v_proj", m1.v_proj.weight.val(), m2.v_proj.weight.val()),
         ("b_proj", m1.b_proj.weight.val(), m2.b_proj.weight.val()),
         ("w_proj", m1.w_proj.weight.val(), m2.w_proj.weight.val()),
-        ("f_proj_1", m1.f_proj_1.weight.val(), m2.f_proj_1.weight.val()),
-        ("g_proj_1", m1.g_proj_1.weight.val(), m2.g_proj_1.weight.val()),
+        (
+            "f_proj_1",
+            m1.f_proj_1.weight.val(),
+            m2.f_proj_1.weight.val(),
+        ),
+        (
+            "g_proj_1",
+            m1.g_proj_1.weight.val(),
+            m2.g_proj_1.weight.val(),
+        ),
         ("o_proj", m1.o_proj.weight.val(), m2.o_proj.weight.val()),
     ] {
         let grad1 = p1.grad(&g1).expect("grad").clone();
@@ -355,10 +418,23 @@ fn chunk64_strong_decay_stays_finite() {
     let s = mk([batch, heads, k_dim, v_dim], Distribution::Normal(0.0, 0.1));
     let scale = (k_dim as f64).powf(-0.5);
 
-    let (out, new_state) = chunk_wy_forward(q.clone(), k.clone(), v.clone(), g, b.clone(), w.clone(), s.clone(), scale, 64);
+    let (out, new_state) = chunk_wy_forward(
+        q.clone(),
+        k.clone(),
+        v.clone(),
+        g,
+        b.clone(),
+        w.clone(),
+        s.clone(),
+        scale,
+        64,
+    );
     // naive form would produce inf/NaN here; everything must be finite
     let mut max_abs = 0.0f32;
-    for (t, name) in [(out.clone().into_data(), "out"), (new_state.into_data(), "state")] {
+    for (t, name) in [
+        (out.clone().into_data(), "out"),
+        (new_state.into_data(), "state"),
+    ] {
         for x in t.bytes.chunks_exact(4) {
             let v = f32::from_le_bytes(x.try_into().unwrap());
             assert!(v.is_finite(), "{name} not finite: {v}");
@@ -369,8 +445,14 @@ fn chunk64_strong_decay_stays_finite() {
     let _ = max_abs;
     // and the chunked path must agree with the token-by-token recurrence
     let (ref_out, _) = burn_gdn2::fused_recurrent_forward(
-        q, k, v, Tensor::<4>::full([batch, heads, time, k_dim], -5.0, &device),
-        b, w, s, scale,
+        q,
+        k,
+        v,
+        Tensor::<4>::full([batch, heads, time, k_dim], -5.0, &device),
+        b,
+        w,
+        s,
+        scale,
     );
     let a = out.into_data();
     let bb = ref_out.into_data();
@@ -383,5 +465,8 @@ fn chunk64_strong_decay_stays_finite() {
         scale_v = scale_v.max(x.abs()).max(y.abs());
     }
     let rel = max_abs / scale_v.max(1e-30);
-    assert!(rel < 1e-3, "chunk64 vs fused-recurrent mismatch: rel={rel:.2e}");
+    assert!(
+        rel < 1e-3,
+        "chunk64 vs fused-recurrent mismatch: rel={rel:.2e}"
+    );
 }

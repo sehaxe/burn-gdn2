@@ -50,20 +50,30 @@ fn bench_train_cuda() {
         let x_plain = Tensor::<3>::random([1, t, d], Distribution::Normal(0.0, 1.0), &plain);
         let x_ad = Tensor::<3>::random([1, t, d], Distribution::Normal(0.0, 1.0), &ad_dev);
 
-        let _ = m_plain.forward_train::<CudaBare>(x_plain.clone()).into_data();
+        let _ = m_plain
+            .forward_train::<CudaBare>(x_plain.clone())
+            .into_data();
         let _ = {
-            let loss = m_ad.forward_train_fused::<AD>(x_ad.clone()).powf_scalar(2.0).mean();
+            let loss = m_ad
+                .forward_train_fused::<AD>(x_ad.clone())
+                .powf_scalar(2.0)
+                .mean();
             let _ = loss.clone().into_data();
             loss.backward()
         };
         let _ = {
-            let loss = m_ad.forward_train::<AD>(x_ad.clone()).powf_scalar(2.0).mean();
+            let loss = m_ad
+                .forward_train::<AD>(x_ad.clone())
+                .powf_scalar(2.0)
+                .mean();
             let _ = loss.clone().into_data();
             loss.backward()
         };
         let runs = if t <= 1024 { 5 } else { 3 };
         let t_fwd = time_it(runs, || {
-            let _ = m_plain.forward_train::<CudaBare>(x_plain.clone()).into_data();
+            let _ = m_plain
+                .forward_train::<CudaBare>(x_plain.clone())
+                .into_data();
         });
         let _ = m_ad.forward_train_fused::<AD>(x_ad.clone());
         let t_train_fused = time_it(runs, || {

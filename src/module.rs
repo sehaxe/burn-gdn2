@@ -1,6 +1,6 @@
-use burn::backend::Backend;
 #[cfg(feature = "autodiff")]
 use burn::backend::AutodiffBackend;
+use burn::backend::Backend;
 use burn::backend::DispatchKindConversion;
 use burn::module::{Initializer, Module, Param};
 use burn::nn::{Linear, LinearConfig};
@@ -402,14 +402,13 @@ impl GatedDeltaNet2 {
             + DispatchKindConversion<B::InnerBackend>
             + DispatchKindConversion<burn_autodiff::Autodiff<B::InnerBackend>>,
     {
-        self.forward_train_core::<B>(hidden_states, crate::autodiff::chunk_autodiff_or_plain::<B::InnerBackend>)
+        self.forward_train_core::<B>(
+            hidden_states,
+            crate::autodiff::chunk_autodiff_or_plain::<B::InnerBackend>,
+        )
     }
 
-    fn forward_train_core<B: Backend>(
-        &self,
-        hidden_states: Tensor<3>,
-        chunk: ChunkFn,
-    ) -> Tensor<3>
+    fn forward_train_core<B: Backend>(&self, hidden_states: Tensor<3>, chunk: ChunkFn) -> Tensor<3>
     where
         DispatchTensor: DispatchKindConversion<B>,
     {

@@ -89,7 +89,10 @@ where
             if cc == c_pad {
                 t
             } else {
-                Tensor::cat(vec![t, Tensor::zeros([batch, heads, c_pad - cc, d], &device)], 2)
+                Tensor::cat(
+                    vec![t, Tensor::zeros([batch, heads, c_pad - cc, d], &device)],
+                    2,
+                )
             }
         };
         let mut s_traj: Vec<Tensor<4>> = Vec::with_capacity(n_chunks + 1);
@@ -99,7 +102,9 @@ where
             let start = ci * chunk_size;
             let c_real = (start + chunk_size).min(time) - start;
             let g_exp = sc.g_exp.clone();
-            let g_last = g_exp.clone().slice([0..batch, 0..heads, c_real - 1..c_real]);
+            let g_last = g_exp
+                .clone()
+                .slice([0..batch, 0..heads, c_real - 1..c_real]);
             let k_c = pad_to(
                 k.clone().slice([0..batch, 0..heads, start..start + c_real]),
                 c_pad,
@@ -128,8 +133,7 @@ where
             let v_new = u_wy - w_wy.matmul(s_before.clone());
             let decay = g_last.clone() / g_exp;
             s_traj.push(
-                s_before * g_last.swap_dims(2, 3)
-                    + (k_c * decay).swap_dims(2, 3).matmul(v_new),
+                s_before * g_last.swap_dims(2, 3) + (k_c * decay).swap_dims(2, 3).matmul(v_new),
             );
         }
 
@@ -163,31 +167,11 @@ where
             };
             let g_exp = sc.g_exp.clone();
             let q_gated = sc.q_gated.clone();
-            let k_c = pad_to(
-                k.clone().slice(range(start, c_real)),
-                c_pad,
-                k_dim,
-            );
-            let v_c = pad_to(
-                v.clone().slice(range(start, c_real)),
-                c_pad,
-                v_dim,
-            );
-            let b_c = pad_to(
-                b.clone().slice(range(start, c_real)),
-                c_pad,
-                k_dim,
-            );
-            let w_c = pad_to(
-                w.clone().slice(range(start, c_real)),
-                c_pad,
-                v_dim,
-            );
-            let d_out_c = pad_to(
-                d_out.clone().slice(range(start, c_real)),
-                c_pad,
-                v_dim,
-            );
+            let k_c = pad_to(k.clone().slice(range(start, c_real)), c_pad, k_dim);
+            let v_c = pad_to(v.clone().slice(range(start, c_real)), c_pad, v_dim);
+            let b_c = pad_to(b.clone().slice(range(start, c_real)), c_pad, k_dim);
+            let w_c = pad_to(w.clone().slice(range(start, c_real)), c_pad, v_dim);
+            let d_out_c = pad_to(d_out.clone().slice(range(start, c_real)), c_pad, v_dim);
             let s_before = s_traj[ci].clone();
 
             // Re-derive the per-chunk values (identical ops to the forward
@@ -282,9 +266,7 @@ where
             // E = exp(G), G = cumsum(g): d_G = d_E·E, d_g = reverse cumsum
             let mut d_e = d_e_rhsk + d_e_kg + d_e_qe + d_e_bke + d_e_decay;
             // E_last = E[c-1] receives the accumulated row adjoint
-            let cur_last = d_e
-                .clone()
-                .slice([0..batch, 0..heads, c_real - 1..c_real]);
+            let cur_last = d_e.clone().slice([0..batch, 0..heads, c_real - 1..c_real]);
             d_e = d_e.slice_assign(
                 [0..batch, 0..heads, c_real - 1..c_real, 0..k_dim],
                 cur_last + d_e_last,
@@ -294,9 +276,7 @@ where
             // the padded rows carry zero gradient; slice back to the real
             // chunk length before concatenating
             d_q_parts.push(d_q_c.slice([0..batch, 0..heads, 0..c_real]));
-            d_k_parts.push(
-                (d_k_bk + d_k_kg + d_k_bptt).slice([0..batch, 0..heads, 0..c_real]),
-            );
+            d_k_parts.push((d_k_bk + d_k_kg + d_k_bptt).slice([0..batch, 0..heads, 0..c_real]));
             d_v_parts.push(d_v_c.slice([0..batch, 0..heads, 0..c_real]));
             d_g_parts.push(d_g_c.slice([0..batch, 0..heads, 0..c_real]));
             d_b_parts.push(d_b_c.slice([0..batch, 0..heads, 0..c_real]));
@@ -320,15 +300,7 @@ where
         let d_b = Tensor::cat(d_b_parts.into_iter().rev().collect(), 2);
         let d_w = Tensor::cat(d_w_parts.into_iter().rev().collect(), 2);
 
-        let d_inputs = [
-            d_q,
-            d_k,
-            d_v,
-            d_g,
-            d_b,
-            d_w,
-            d_s,
-        ];
+        let d_inputs = [d_q, d_k, d_v, d_g, d_b, d_w, d_s];
         for (i, grad) in d_inputs.into_iter().enumerate() {
             if let Some(node) = ops.parents[i].clone() {
                 grads.register::<B>(node.id, grad.try_into_primitive::<B>().unwrap());
@@ -457,9 +429,8 @@ where
         }
         #[cfg(not(feature = "cuda"))]
         {
-            let (o, ns, sc) = chunk_wy_forward_impl(
-                q_t, k_t, v_t, g_t, b_t, w_t, s_t, scale, chunk_size, None,
-            );
+            let (o, ns, sc) =
+                chunk_wy_forward_impl(q_t, k_t, v_t, g_t, b_t, w_t, s_t, scale, chunk_size, None);
             (o, ns, Some(sc))
         }
     };
@@ -489,14 +460,25 @@ where
                 Some(prep.checkpoint(&state)),
             ];
             let out = prep.finish(
-                (ids, scale, chunk_size, scratch.expect("chunk forward always produces a scratch")),
+                (
+                    ids,
+                    scale,
+                    chunk_size,
+                    scratch.expect("chunk forward always produces a scratch"),
+                ),
                 out_prim,
             );
-            (out, <Autodiff<Inner> as AutodiffBackend>::from_inner(new_state_prim))
+            (
+                out,
+                <Autodiff<Inner> as AutodiffBackend>::from_inner(new_state_prim),
+            )
         }
         OpsKind::UnTracked(prep) => {
             let out = prep.finish(out_prim);
-            (out, <Autodiff<Inner> as AutodiffBackend>::from_inner(new_state_prim))
+            (
+                out,
+                <Autodiff<Inner> as AutodiffBackend>::from_inner(new_state_prim),
+            )
         }
     };
 
@@ -523,6 +505,16 @@ pub fn chunk_autodiff_or_plain<Inner: Backend>(
 where
     DispatchTensor: DispatchKindConversion<Autodiff<Inner>> + DispatchKindConversion<Inner>,
 {
-    chunk_wy_forward_autodiff::<Inner>(q.clone(), k.clone(), v.clone(), g.clone(), b.clone(), w.clone(), state.clone(), scale, chunk_size)
-        .unwrap_or_else(|| chunk_wy_forward(q, k, v, g, b, w, state, scale, chunk_size))
+    chunk_wy_forward_autodiff::<Inner>(
+        q.clone(),
+        k.clone(),
+        v.clone(),
+        g.clone(),
+        b.clone(),
+        w.clone(),
+        state.clone(),
+        scale,
+        chunk_size,
+    )
+    .unwrap_or_else(|| chunk_wy_forward(q, k, v, g, b, w, state, scale, chunk_size))
 }
