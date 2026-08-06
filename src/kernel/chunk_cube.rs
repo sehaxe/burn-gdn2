@@ -610,6 +610,129 @@ fn gdn2_chunk_inter_kernel<F: Float>(
 }
 
 #[cfg(feature = "cuda")]
+
+/// Re-runs the chunked trajectory from the exported `u`/`w`/`kgd`/`glast` and
+/// the initial state, dumping `v_new` and the pre-chunk states for the fused
+/// backward. A separate launch: the inter kernel's hot loop stays untouched.
+#[cube(launch_unchecked)]
+fn gdn2_chunk_trajectory_export_kernel<F: Float>(
+    u_buf: &Array<F>,    // [nblk, V, C] transposed U[v][r]
+    w_buf: &Array<F>,    // [nblk, K, C] transposed W[k][r]
+    kgd: &Array<F>,      // [nblk, C, K]
+    glast: &Array<F>,    // [nblk, K]
+    state_in: &Array<F>, // [bh, K, V]
+    v_new_out: &mut Array<F>,  // [nblk, C, V]
+    states_out: &mut Array<F>, // [nblk, K, V]
+    nt: u32,
+    #[comptime] chunk_c: u32,
+    #[comptime] k_dim: u32,
+    #[comptime] v_dim: u32,
+    #[comptime] vtile: u32,
+) {
+    let bh = CUBE_POS_X as usize;
+    let vt = CUBE_POS_Y as usize;
+    let r = UNIT_POS_X as usize;
+    let grp = UNIT_POS_Y as usize;
+    let c = chunk_c as usize;
+    let kd = k_dim as usize;
+    let vd = v_dim as usize;
+    let vtile = vtile as usize;
+    let n_vp = 2;
+    let vs = vt * vtile;
+    let slot = grp * n_vp;
+
+    if r < c {
+        let mut s_sh = SharedMemory::<F>::new(kd * vtile);
+        let mut vn_sh = SharedMemory::<F>::new(c * vtile);
+        let mut jj = 0;
+        while jj < n_vp {
+            let vv = vs + slot + jj;
+            if vv < vd {
+                let mut kk = r;
+                while kk < kd {
+                    s_sh[kk * vtile + slot + jj] = state_in[bh * kd * vd + kk * vd + vv];
+                    kk += c;
+                }
+            }
+            jj += 1;
+        }
+        sync_cube();
+
+        let mut t = 0;
+        while t < nt as usize {
+            let cb = bh * (nt as usize) + t;
+            let uo = cb * vd * c;
+            let wo = cb * kd * c;
+            let ko = cb * c * kd;
+            let mut jj = 0;
+            while jj < n_vp {
+                let vv = vs + slot + jj;
+                if vv < vd {
+                    let mut acc = F::new(0.0_f32);
+                    let mut kk = 0;
+                    while kk + 3 < kd {
+                        acc += w_buf[wo + kk * c + r] * s_sh[kk * vtile + slot + jj];
+                        acc += w_buf[wo + (kk + 1) * c + r] * s_sh[(kk + 1) * vtile + slot + jj];
+                        acc += w_buf[wo + (kk + 2) * c + r] * s_sh[(kk + 2) * vtile + slot + jj];
+                        acc += w_buf[wo + (kk + 3) * c + r] * s_sh[(kk + 3) * vtile + slot + jj];
+                        kk += 4;
+                    }
+                    while kk < kd {
+                        acc += w_buf[wo + kk * c + r] * s_sh[kk * vtile + slot + jj];
+                        kk += 1;
+                    }
+                    let vn = u_buf[uo + vv * c + r] - acc;
+                    vn_sh[r * vtile + slot + jj] = vn;
+                    v_new_out[cb * c * vd + r * vd + vv] = vn;
+                }
+                jj += 1;
+            }
+            sync_cube();
+            let mut jj = 0;
+            while jj < n_vp {
+                let vv = vs + slot + jj;
+                if vv < vd {
+                    let mut kk = r;
+                    while kk < kd {
+                        states_out[cb * kd * vd + kk * vd + vv] =
+                            s_sh[kk * vtile + slot + jj];
+                        kk += c;
+                    }
+                }
+                jj += 1;
+            }
+            let mut jj = 0;
+            while jj < n_vp {
+                let vv = vs + slot + jj;
+                if vv < vd {
+                    let mut kk = r;
+                    while kk < kd {
+                        let mut acc = F::new(0.0_f32);
+                        let mut r2 = 0;
+                        while r2 + 3 < c {
+                            acc += kgd[ko + r2 * kd + kk] * vn_sh[r2 * vtile + slot + jj];
+                            acc += kgd[ko + (r2 + 1) * kd + kk] * vn_sh[(r2 + 1) * vtile + slot + jj];
+                            acc += kgd[ko + (r2 + 2) * kd + kk] * vn_sh[(r2 + 2) * vtile + slot + jj];
+                            acc += kgd[ko + (r2 + 3) * kd + kk] * vn_sh[(r2 + 3) * vtile + slot + jj];
+                            r2 += 4;
+                        }
+                        while r2 < c {
+                            acc += kgd[ko + r2 * kd + kk] * vn_sh[r2 * vtile + slot + jj];
+                            r2 += 1;
+                        }
+                        s_sh[kk * vtile + slot + jj] =
+                            s_sh[kk * vtile + slot + jj] * glast[cb * kd + kk] + acc;
+                        kk += c;
+                    }
+                }
+                jj += 1;
+            }
+            sync_cube();
+            t += 1;
+        }
+    }
+}
+
 pub mod cuda {
     use super::*;
     use burn::tensor::{backend::Backend, Tensor};
@@ -665,7 +788,7 @@ pub mod cuda {
         state: Tensor<B, 4>,
         scale: f64,
         chunk_size: usize,
-    ) -> Option<(Tensor<B, 4>, Tensor<B, 4>)> {
+    ) -> Option<(Tensor<B, 4>, Tensor<B, 4>, Tensor<B, 3>, Tensor<B, 3>)> {
         let [batch, heads, time, k_dim] = q.shape().dims::<4>();
         let v_dim = v.shape().dims::<4>()[3];
         let c = chunk_size;
@@ -686,6 +809,7 @@ pub mod cuda {
         let b = cube_of(&b)?;
         let w = cube_of(&w)?;
         let state_cube = cube_of(&state)?;
+        let state_initial = state.clone() * 1.0;
 
         let nblk = bh * nt;
         let client = state_cube.client.clone();
@@ -792,7 +916,39 @@ pub mod cuda {
             );
         }
 
-        Some((out, state))
+        let v_new_out = Tensor::<B, 3>::empty([nblk, c, v_dim], &device);
+        let states_out = Tensor::<B, 3>::empty([nblk, k_dim, v_dim], &device);
+        let v_new_c = cube_of(&v_new_out).expect("backend mismatch");
+        let states_c = cube_of(&states_out).expect("backend mismatch");
+        let state_initial_c = cube_of(&state_initial).expect("backend mismatch");
+        let vt = v_dim.div_ceil(vtile);
+        let cube_dim3 = CubeDim {
+            x: c as u32,
+            y: (vtile / 2) as u32,
+            z: 1,
+        };
+        let cube_count3 = CubeCount::Static(bh as u32, vt as u32, 1);
+        unsafe {
+            gdn2_chunk_trajectory_export_kernel::launch_unchecked::<f32, cubecl::cuda::CudaRuntime>(
+                &client,
+                cube_count3,
+                cube_dim3,
+                ArrayArg::from_raw_parts(u_c.handle.clone(), nblk * v_dim * c),
+                ArrayArg::from_raw_parts(w_c.handle.clone(), nblk * k_dim * c),
+                ArrayArg::from_raw_parts(kgd_c.handle.clone(), nblk * c * k_dim),
+                ArrayArg::from_raw_parts(glast_c.handle.clone(), nblk * k_dim),
+                ArrayArg::from_raw_parts(state_initial_c.handle, bh * k_dim * v_dim),
+                ArrayArg::from_raw_parts(v_new_c.handle.clone(), nblk * c * v_dim),
+                ArrayArg::from_raw_parts(states_c.handle.clone(), nblk * k_dim * v_dim),
+                nt as u32,
+                c as u32,
+                k_dim as u32,
+                v_dim as u32,
+                vtile as u32,
+            );
+        }
+
+        Some((out, state, v_new_out, states_out))
     }
 
     /// Inter kernel only, with a tunable `vtile`/`y_dim` (diagnostics).
