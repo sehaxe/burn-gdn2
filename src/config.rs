@@ -30,12 +30,12 @@ pub struct Gdn2Config {
     pub head_dim: usize,
     /// Expansion factor for the value dimension.
     /// `head_v_dim = head_dim * expand_v`, `value_dim = num_v_heads * head_v_dim`.
-    /// Must produce an integer `head_v_dim` (checked at [`GatedDeltaNet2::new`]).
+    /// Must produce an integer `head_v_dim` (checked at [`GatedDeltaNet2::new`](crate::GatedDeltaNet2::new)).
     pub expand_v: f32,
     /// Number of value heads. If `None`, equals `num_heads`.
     /// GVA (Grouped Value Attention) is applied when `num_v_heads > num_heads`
     /// and must then be divisible by `num_heads` (checked at
-    /// [`GatedDeltaNet2::new`]). `num_v_heads < num_heads` is not supported.
+    /// [`GatedDeltaNet2::new`](crate::GatedDeltaNet2::new)). `num_v_heads < num_heads` is not supported.
     pub num_v_heads: Option<usize>,
     /// Whether to apply a short-depthwise convolution before the recurrence.
     pub use_short_conv: bool,

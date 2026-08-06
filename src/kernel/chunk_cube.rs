@@ -39,6 +39,7 @@ fn gdn2_chunk_intra_kernel<F: Float>(
     wvt: &mut [F],   // [BH*NT, V, C]  w_gate ⊙ v, transposed
     aqk: &mut [F],   // [BH*NT, C, C]  causal, scaled
     akk: &mut [F],   // [BH*NT, C, C]  strict lower (the T matrix)
+    m_inv_out: &mut [F], // [BH*NT, C, C]  A = (I + T)^-1 (exported for backward)
     w: &mut [F],     // [BH*NT, C, K]  pseudo-key  = A @ (b⊙k⊙g_exp)
     u: &mut [F],     // [BH*NT, C, V]  pseudo-value = A @ (w_gate⊙v)
     kgd: &mut [F],   // [BH*NT, C, K]  k ⊙ g_exp[last] / g_exp
@@ -72,10 +73,18 @@ fn gdn2_chunk_intra_kernel<F: Float>(
         while idx < c * kd {
             let cc = idx % kd;
             let rr = idx / kd;
+            // Kahan-compensated prefix sum: the plain serial accumulation
+            // drifts ~1e-4 relative vs the cuBLAS-matmulled cumsum of the
+            // tensor path once exp() amplifies it; compensation keeps the two
+            // paths within fp32 noise of each other.
             let mut acc = F::new(0.0_f32);
+            let mut comp = F::new(0.0_f32);
             let mut j = 0;
             while j <= rr {
-                acc += g[base + j * kd + cc];
+                let y = g[base + j * kd + cc] - comp;
+                let t = acc + y;
+                comp = (t - acc) - y;
+                acc = t;
                 j += 1;
             }
             gexp[base + idx] = F::exp(acc);
@@ -245,6 +254,15 @@ fn gdn2_chunk_intra_kernel<F: Float>(
             row += 1;
         }
         // All threads must wait: P4 reads the full A matrix from shared.
+        sync_cube();
+        // Export A (= M^-1) so the training backward can reuse it and skip
+        // re-inverting: the autodiff op saves this and the recompute feeds it
+        // straight into W = A@rhs, d_rhs = A^T@d_*.
+        let mut row = 0;
+        while row < c {
+            m_inv_out[block * c * c + row * c + r] = a_sh[row * ac + r];
+            row += 1;
+        }
         sync_cube();
     }
 
@@ -621,7 +639,7 @@ pub mod cuda {
     /// The bare (non-fusion) CUDA backend the fused kernels target.
     pub type CudaBare = CubeBackend<cubecl::cuda::CudaRuntime>;
 
-    fn is_cuda<B: Backend>() -> bool {
+    pub(crate) fn is_cuda<B: Backend>() -> bool {
         TypeId::of::<B>() == TypeId::of::<CudaBare>()
     }
 
@@ -659,7 +677,7 @@ pub mod cuda {
     /// multiple of the chunk size, or the dimensions exceed the kernel limits;
     /// the caller then falls back to the tensor-ops path.
     #[allow(clippy::too_many_arguments)]
-    pub fn fused_chunk_forward<B: Backend>(
+    pub fn fused_chunk_forward_scratch<B: Backend>(
         q: Tensor<4>,
         k: Tensor<4>,
         v: Tensor<4>,
@@ -669,7 +687,7 @@ pub mod cuda {
         state: Tensor<4>,
         scale: f64,
         chunk_size: usize,
-    ) -> Option<(Tensor<4>, Tensor<4>)>
+    ) -> Option<(Tensor<4>, Tensor<4>, IntraOut)>
     where
         DispatchTensor: DispatchKindConversion<B>,
     {
@@ -692,7 +710,11 @@ pub mod cuda {
         let g = cube_of::<B, 4>(&g)?;
         let b = cube_of::<B, 4>(&b)?;
         let w = cube_of::<B, 4>(&w)?;
-        let state_cube = cube_of::<B, 4>(&state)?;
+        // The inter kernel mutates the state buffer in place; give it a
+        // private copy so the caller's tensor (and any autodiff checkpoint
+        // holding the same handle) is never corrupted.
+        let state = state.clone() * 1.0;
+        let state_cube = cube_of::<B, 4>(&state).expect("backend mismatch");
 
         let nblk = bh * nt;
         let client = state_cube.client.clone();
@@ -704,6 +726,7 @@ pub mod cuda {
         let bkt = mk([nblk, k_dim, c]);
         let aqk = mk([nblk, c, c]);
         let akk = mk([nblk, c, c]);
+        let m_inv = mk([nblk, c, c]);
         let w_blk = mk([nblk, c, k_dim]);
         let u_blk = mk([nblk, c, v_dim]);
         let kgd = mk([nblk, c, k_dim]);
@@ -711,6 +734,7 @@ pub mod cuda {
         let glast = Tensor::<2>::empty([nblk, k_dim], &device);
         let out = Tensor::<4>::empty([batch, heads, time, v_dim], &device);
 
+        let m_inv_c = cube_of::<B, 3>(&m_inv).expect("backend mismatch");
         let gexp_c = cube_of::<B, 3>(&gexp).expect("backend mismatch");
         let kgt_c = cube_of::<B, 3>(&kgt).expect("backend mismatch");
         let qgt_c = cube_of::<B, 3>(&qgt).expect("backend mismatch");
@@ -757,6 +781,7 @@ pub mod cuda {
                 BufferArg::from_raw_parts(wvt_c.handle, nv),
                 BufferArg::from_raw_parts(aqk_c.handle.clone(), ncc),
                 BufferArg::from_raw_parts(akk_c.handle, ncc),
+                BufferArg::from_raw_parts(m_inv_c.handle.clone(), ncc),
                 BufferArg::from_raw_parts(w_c.handle.clone(), nk),
                 BufferArg::from_raw_parts(u_c.handle.clone(), nv),
                 BufferArg::from_raw_parts(kgd_c.handle.clone(), nk),
@@ -799,7 +824,43 @@ pub mod cuda {
             );
         }
 
-        Some((out, state))
+        Some((
+            out.clone(),
+            state,
+            IntraOut {
+                aqk,
+                w: w_blk,
+                u: u_blk,
+                kgd,
+                glast,
+                qgt,
+                wvt,
+                m_inv,
+                out,
+            },
+        ))
+    }
+
+    /// Fused chunked forward without the exported intermediates (module path).
+    #[allow(clippy::too_many_arguments)]
+    pub fn fused_chunk_forward<B: Backend>(
+        q: Tensor<4>,
+        k: Tensor<4>,
+        v: Tensor<4>,
+        g: Tensor<4>,
+        b: Tensor<4>,
+        w: Tensor<4>,
+        state: Tensor<4>,
+        scale: f64,
+        chunk_size: usize,
+    ) -> Option<(Tensor<4>, Tensor<4>)>
+    where
+        DispatchTensor: DispatchKindConversion<B>,
+    {
+        fused_chunk_forward_scratch::<B>(
+            q, k, v, g, b, w, state, scale, chunk_size,
+        )
+        .map(|(out, state, _io)| (out, state))
     }
 
     /// Inter kernel only, with a tunable `vtile`/`y_dim` (diagnostics).
@@ -884,6 +945,7 @@ pub mod cuda {
         pub glast: Tensor<2>,
         pub qgt: Tensor<3>,
         pub wvt: Tensor<3>,
+        pub m_inv: Tensor<3>,
         pub out: Tensor<4>,
     }
 
@@ -932,7 +994,9 @@ pub mod cuda {
         let kgd = mk([nblk, c, k_dim]);
         let wvt = mk([nblk, v_dim, c]);
         let glast = Tensor::<2>::empty([nblk, k_dim], &device);
+        let m_inv = mk([nblk, c, c]);
         let out = Tensor::<4>::empty([batch, heads, time, v_dim], &device);
+        let m_inv_c = cube_of::<B, 3>(&m_inv).expect("backend mismatch");
         let gexp_c = cube_of::<B, 3>(&gexp).expect("backend mismatch");
         let kgt_c = cube_of::<B, 3>(&kgt).expect("backend mismatch");
         let qgt_c = cube_of::<B, 3>(&qgt).expect("backend mismatch");
@@ -972,6 +1036,7 @@ pub mod cuda {
                 BufferArg::from_raw_parts(wvt_c.handle, nv),
                 BufferArg::from_raw_parts(aqk_c.handle.clone(), ncc),
                 BufferArg::from_raw_parts(akk_c.handle, ncc),
+                BufferArg::from_raw_parts(m_inv_c.handle.clone(), ncc),
                 BufferArg::from_raw_parts(w_c.handle.clone(), nk),
                 BufferArg::from_raw_parts(u_c.handle.clone(), nv),
                 BufferArg::from_raw_parts(kgd_c.handle.clone(), nk),
@@ -991,6 +1056,7 @@ pub mod cuda {
             glast,
             qgt,
             wvt,
+            m_inv,
             out,
         }
     }

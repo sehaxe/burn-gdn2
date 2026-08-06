@@ -3,6 +3,7 @@
 fn test_chunk_vs_reference() {
     use burn::module::Param;
     use burn::nn::{Linear, LinearConfig};
+    use burn::backend::NdArray;
     use burn::tensor::Device;
     use burn::tensor::{Tensor, TensorData};
     use burn_gdn2::{GatedDeltaNet2, Gdn2Config, Gdn2Mode, Gdn2State};
@@ -51,19 +52,19 @@ fn test_chunk_vs_reference() {
         c.read_exact(buf).unwrap();
         (shape, flat)
     }
-    fn t2(flat: &[f32], shape: &[usize], device: &NdArrayDevice) -> Tensor<2> {
+    fn t2(flat: &[f32], shape: &[usize], device: &Device) -> Tensor<2> {
         Tensor::from_data(TensorData::new(flat.to_vec(), shape.to_vec()), device)
     }
-    fn t1(flat: &[f32], shape: &[usize], device: &NdArrayDevice) -> Tensor<1> {
+    fn t1(flat: &[f32], shape: &[usize], device: &Device) -> Tensor<1> {
         Tensor::from_data(TensorData::new(flat.to_vec(), shape.to_vec()), device)
     }
-    fn lin_w(weight: Tensor<2>, device: &NdArrayDevice) -> Linear {
+    fn lin_w(weight: Tensor<2>, device: &Device) -> Linear {
         let [out_f, in_f] = weight.shape().dims::<2>();
         let mut lin = LinearConfig::new(in_f, out_f).with_bias(false).init(device);
         lin.weight = Param::from_tensor(weight);
         lin
     }
-    fn lin_wb(weight: Tensor<2>, bias: Tensor<1>, device: &NdArrayDevice) -> Linear {
+    fn lin_wb(weight: Tensor<2>, bias: Tensor<1>, device: &Device) -> Linear {
         let [out_f, in_f] = weight.shape().dims::<2>();
         let mut lin = LinearConfig::new(in_f, out_f).with_bias(true).init(device);
         lin.weight = Param::from_tensor(weight);
@@ -88,7 +89,7 @@ fn test_chunk_vs_reference() {
     }
     let n_cases = read_i32(&mut c) as usize;
 
-    let device = Device::NdArray;
+    let device = Device::ndarray();
     let get = |name: &str| -> &[f32] {
         let (_, _, d) = tensors.iter().find(|(n, _, _)| n == name).unwrap();
         d
@@ -148,11 +149,11 @@ fn test_chunk_vs_reference() {
             let (in_shape, in_data) = read_raw_f32_tensor(&mut c);
             let (out_shape, out_data) = read_raw_f32_tensor(&mut c);
             let input =
-                Tensor::<NdArray, 3>::from_data(TensorData::new(in_data, in_shape), &device);
+                Tensor::<3>::from_data(TensorData::new(in_data, in_shape), &device);
             let ref_out =
-                Tensor::<NdArray, 3>::from_data(TensorData::new(out_data, out_shape), &device);
-            let mut state: Option<Gdn2State<NdArray>> = None;
-            let output = module.forward(input, &mut state, true);
+                Tensor::<3>::from_data(TensorData::new(out_data, out_shape), &device);
+            let mut state: Option<Gdn2State> = None;
+            let output = module.forward::<NdArray>(input, &mut state, true);
             let out_bytes: Vec<f32> = output
                 .into_data()
                 .bytes
@@ -196,11 +197,12 @@ fn test_chunk_vs_reference() {
 #[test]
 #[cfg(feature = "binary-tests")]
 fn test_chunk_matches_fused_with_real_decay() {
+    use burn::backend::NdArray;
     use burn::tensor::Device;
     use burn::tensor::{Distribution, Tensor};
     use burn_gdn2::{chunk_wy_forward, fused_recurrent_forward};
 
-    let device = Device::NdArray;
+    let device = Device::ndarray();
     let (b, h, t, k, vd, c) = (2usize, 3usize, 130usize, 16usize, 8usize, 64usize);
 
     // Strong, non-uniform per-channel decay: log-decay in [-0.15, -0.01]
@@ -210,18 +212,18 @@ fn test_chunk_matches_fused_with_real_decay() {
     // Note: keys must be L2-normalized (as the module does) or the delta-rule
     // operator (I - (b*k)k^T) is unstable for raw Gaussian keys.
     let g =
-        Tensor::<NdArray, 4>::random([b, h, t, k], Distribution::Uniform(-0.15, -0.01), &device);
-    let q = Tensor::<NdArray, 4>::random([b, h, t, k], Distribution::Normal(0.0, 1.0), &device);
+        Tensor::<4>::random([b, h, t, k], Distribution::Uniform(-0.15, -0.01), &device);
+    let q = Tensor::<4>::random([b, h, t, k], Distribution::Normal(0.0, 1.0), &device);
     let kt_raw =
-        Tensor::<NdArray, 4>::random([b, h, t, k], Distribution::Normal(0.0, 1.0), &device);
+        Tensor::<4>::random([b, h, t, k], Distribution::Normal(0.0, 1.0), &device);
     let kt = kt_raw.clone() / kt_raw.powf_scalar(2.0).sum_dim(3).sqrt();
-    let v = Tensor::<NdArray, 4>::random([b, h, t, vd], Distribution::Normal(0.0, 1.0), &device);
+    let v = Tensor::<4>::random([b, h, t, vd], Distribution::Normal(0.0, 1.0), &device);
     let erase =
-        Tensor::<NdArray, 4>::random([b, h, t, k], Distribution::Uniform(0.0, 1.0), &device);
+        Tensor::<4>::random([b, h, t, k], Distribution::Uniform(0.0, 1.0), &device);
     let write =
-        Tensor::<NdArray, 4>::random([b, h, t, vd], Distribution::Normal(0.0, 1.0), &device);
+        Tensor::<4>::random([b, h, t, vd], Distribution::Normal(0.0, 1.0), &device);
     let state =
-        Tensor::<NdArray, 4>::random([b, h, k, vd], Distribution::Normal(0.0, 1.0), &device);
+        Tensor::<4>::random([b, h, k, vd], Distribution::Normal(0.0, 1.0), &device);
 
     let (chunk_out, chunk_state) = chunk_wy_forward(
         q.clone(),

@@ -1,0 +1,471 @@
+//! Custom autodiff operation for the chunked WY forward.
+//!
+//! The whole [`chunk_wy_forward`] is executed
+//! as a single tracked node on the inner backend (no per-op autodiff graph
+//! overhead), and the backward pass computes *exact* gradients through the
+//! WY representation:
+//!
+//! - the token loop of the WY solve `(I+L)·W = rhs_k`, `(I+L)·U = rhs_v` is
+//!   differentiated at the matrix level via the triangular adjoint
+//!   `d_rhs = (I+L)^-T · d_*`, `d_akk = tril_strict(-d_rhs·W^T - d_rhs·U^T)`,
+//! - all elementwise gates are differentiated symbolically.
+//!
+//! The backward recomputes the forward intermediates (deterministic on a given
+//! backend), so the op state only carries the input checkpoints.
+//!
+//! ponytail: `new_state` is returned as an untracked leaf — gradients through
+//! the *output* state (manual BPTT chaining) are not supported; the *input*
+//! state gradient is exact. Add a two-output step if chaining is ever needed.
+
+use burn::backend::{AutodiffBackend, Backend, DispatchKindConversion};
+use burn::tensor::{DispatchTensor, Tensor};
+use burn_autodiff::checkpoint::base::Checkpointer;
+use burn_autodiff::checkpoint::strategy::NoCheckpointing;
+use burn_autodiff::grads::Gradients;
+use burn_autodiff::ops::{Backward, Ops, OpsKind};
+use burn_autodiff::{Autodiff, NodeId};
+
+use crate::forward::{chunk_masks, chunk_wy_forward, chunk_wy_forward_impl};
+
+const N_PARENTS: usize = 7;
+
+#[derive(Debug)]
+struct ChunkWy;
+
+impl<B: Backend> Backward<B, N_PARENTS> for ChunkWy
+where
+    DispatchTensor: DispatchKindConversion<B>,
+{
+    type State = (
+        [Option<NodeId>; N_PARENTS],
+        f64,
+        usize,
+        crate::forward::ChunkWyScratch,
+    );
+
+    fn backward(
+        self,
+        ops: Ops<Self::State, N_PARENTS>,
+        grads: &mut Gradients,
+        checkpointer: &mut Checkpointer,
+    ) {
+        let (ids, scale, chunk_size, scratch) = ops.state;
+        // q and g are not checkpointed: the scratch (always saved) carries
+        // everything their values would contribute (qE, E), so the adjoint
+        // never touches q or g. Keeping them out saves 2 full-sequence
+        // tensors per training step.
+        let k = ids[1]
+            .map(|id| Tensor::from_primitive::<B>(checkpointer.retrieve_node_output(id)))
+            .expect("k is checkpointed");
+        let v = ids[2]
+            .map(|id| Tensor::from_primitive::<B>(checkpointer.retrieve_node_output(id)))
+            .expect("v is checkpointed");
+        let b = ids[4]
+            .map(|id| Tensor::from_primitive::<B>(checkpointer.retrieve_node_output(id)))
+            .expect("b is checkpointed");
+        let w = ids[5]
+            .map(|id| Tensor::from_primitive::<B>(checkpointer.retrieve_node_output(id)))
+            .expect("w is checkpointed");
+        let s_in = ids[6]
+            .map(|id| Tensor::from_primitive::<B>(checkpointer.retrieve_node_output(id)))
+            .expect("state is checkpointed");
+
+        let d_out = Tensor::from_primitive::<B>(grads.consume::<B>(&ops.node));
+
+        let [batch, heads, _time, k_dim] = k.shape().dims::<4>();
+        let device = k.device();
+        let n_chunks = scratch.chunks.len();
+
+        // --- forward pass over the chunks: derive the values the minimal
+        // scratch does not store (kG, rhs, W, U, v_new) and replay the state
+        // trajectory. Chunk i's adjoint uses the state *before* chunk i, and
+        // the state output of chunk i feeds chunk i+1 (BPTT), so the state
+        // adjoint accumulates backwards over chunks.
+        let mut s_traj: Vec<Tensor<4>> = Vec::with_capacity(n_chunks + 1);
+        s_traj.push(s_in.clone());
+        for (ci, sc) in scratch.chunks.iter().enumerate() {
+            let c = sc.g_exp.shape().dims::<4>()[2];
+            let start = ci * chunk_size;
+            let g_exp = sc.g_exp.clone();
+            let g_last = g_exp.clone().slice([0..batch, 0..heads, c - 1..c]);
+            let k_c = k.clone().slice([0..batch, 0..heads, start..start + c]);
+            let v_c = v.clone().slice([0..batch, 0..heads, start..start + c]);
+            let b_c = b.clone().slice([0..batch, 0..heads, start..start + c]);
+            let w_c = w.clone().slice([0..batch, 0..heads, start..start + c]);
+            let rhs_k = b_c.clone() * k_c.clone() * g_exp.clone();
+            let rhs_v = w_c.clone() * v_c.clone();
+            let w_wy = sc.m_inv.clone().matmul(rhs_k);
+            let u_wy = sc.m_inv.clone().matmul(rhs_v);
+            let s_before = s_traj.last().unwrap().clone();
+            let v_new = u_wy - w_wy.matmul(s_before.clone());
+            let decay = g_last.clone() / g_exp;
+            s_traj.push(
+                s_before * g_last.swap_dims(2, 3)
+                    + (k_c * decay).swap_dims(2, 3).matmul(v_new),
+            );
+        }
+
+        let mut d_s = Tensor::zeros_like(&s_in);
+        let mut d_state_acc = Tensor::zeros_like(&s_in);
+        let (causal_full, strict_full) = chunk_masks(chunk_size, &device);
+        let scale_causal_full = causal_full.clone() * scale;
+        // Per-chunk gradient parts, concatenated once at the end: incremental
+        // slice_assign accumulation would copy the full-length buffer on every
+        // chunk (refcount bump from the read clone), i.e. ~12 GB of copies per
+        // training step at d=2048, T=4096.
+        let mut d_q_parts: Vec<Tensor<4>> = Vec::with_capacity(n_chunks);
+        let mut d_k_parts: Vec<Tensor<4>> = Vec::with_capacity(n_chunks);
+        let mut d_v_parts: Vec<Tensor<4>> = Vec::with_capacity(n_chunks);
+        let mut d_g_parts: Vec<Tensor<4>> = Vec::with_capacity(n_chunks);
+        let mut d_b_parts: Vec<Tensor<4>> = Vec::with_capacity(n_chunks);
+        let mut d_w_parts: Vec<Tensor<4>> = Vec::with_capacity(n_chunks);
+
+        for (ri, sc) in scratch.chunks.iter().rev().enumerate() {
+            let ci = n_chunks - 1 - ri;
+            let c = sc.g_exp.shape().dims::<4>()[2];
+            let start = ci * chunk_size;
+            let range = |l: usize, d: usize| [0..batch, 0..heads, l..l + d];
+
+            let (scale_causal, strict) = if c == chunk_size {
+                (scale_causal_full.clone(), strict_full.clone())
+            } else {
+                let (cau, str) = chunk_masks(c, &device);
+                (cau * scale, str)
+            };
+            let g_exp = sc.g_exp.clone();
+            let q_gated = sc.q_gated.clone();
+            let k_c = k.clone().slice(range(start, c));
+            let v_c = v.clone().slice(range(start, c));
+            let b_c = b.clone().slice(range(start, c));
+            let w_c = w.clone().slice(range(start, c));
+            let d_out_c = d_out.clone().slice(range(start, c));
+            let s_before = s_traj[ci].clone();
+
+            // Re-derive the per-chunk values (identical ops to the forward
+            // pass, so bit-identical results).
+            let k_g = k_c.clone() / g_exp.clone();
+            let rhs_k = b_c.clone() * k_c.clone() * g_exp.clone();
+            let rhs_v = w_c.clone() * v_c.clone();
+            let w_wy = sc.m_inv.clone().matmul(rhs_k.clone());
+            let u_wy = sc.m_inv.clone().matmul(rhs_v.clone());
+            let v_new = u_wy.clone() - w_wy.clone().matmul(s_before.clone());
+
+            // out = aqk·v_new + (q·E)·S_in·scale
+            let d_aqk = d_out_c.clone().matmul(v_new.clone().swap_dims(2, 3));
+            let d_qk = d_aqk * scale_causal;
+            let d_v_new = sc.aqk.clone().swap_dims(2, 3).matmul(d_out_c.clone());
+
+            // BPTT through the state output S_out = S·E_last^T + (k·decay)^T·v_new:
+            // d_K̂ = v_new·d_state_acc^T, d_v_new += K̂·d_state_acc.
+            let g_last = g_exp.clone().slice([0..batch, 0..heads, c - 1..c]);
+            let decay = g_last.clone() / g_exp.clone();
+            let d_k_hat = v_new.clone().matmul(d_state_acc.clone().swap_dims(2, 3));
+            let d_k_bptt = d_k_hat.clone() * decay.clone();
+            let d_decay = d_k_hat * k_c.clone();
+            let khat = decay.clone() * k_c.clone();
+            let d_v_new = d_v_new + khat.matmul(d_state_acc.clone());
+
+            // v_new = U - W·S_in  →  d_S_in = -W^T·d_v_new
+            let mut d_s_c = -(w_wy.clone().swap_dims(2, 3).matmul(d_v_new.clone()));
+            // inter = (q·E)·S_in·scale
+            d_s_c = d_s_c
+                + q_gated
+                    .clone()
+                    .swap_dims(2, 3)
+                    .matmul(d_out_c.clone())
+                    .mul_scalar(scale);
+            // d_S_in += E_last ⊙ d_state_acc  (the state-input part of BPTT)
+            d_s_c = d_s_c + g_last.clone().swap_dims(2, 3) * d_state_acc.clone();
+
+            // decay = E_last / E: d_E_last = Σ_t d_decay/E + Σ_v d_state_acc·S,
+            // d_E[t] = -d_decay·decay/E, and E_last = E[c-1].
+            let d_e_last = (d_decay.clone() / g_exp.clone()).sum_dim(2)
+                + d_state_acc
+                    .clone()
+                    .mul(s_before.clone())
+                    .sum_dim(3)
+                    .swap_dims(2, 3);
+            let d_e_decay = -(d_decay * decay / g_exp.clone());
+
+            // q·E: from inter (scale·d_out·S_in^T) and aqk (d_qk·kG)
+            let d_qe = d_out_c
+                .clone()
+                .matmul(s_before.clone().swap_dims(2, 3))
+                .mul_scalar(scale)
+                + d_qk.clone().matmul(k_g.clone());
+            let d_k_g = d_qk.swap_dims(2, 3).matmul(q_gated.clone());
+
+            // WY solves: d_W = -d_v_new·S_in^T, d_U = d_v_new,
+            // d_rhs = M⁻ᵀ·d_* (M⁻¹ from the scratch), d_akk =
+            // strict ⊙ (-d_rhs_k W^T - d_rhs_v U^T)
+            let d_w_wy = -(d_v_new.clone().matmul(s_before.clone().swap_dims(2, 3)));
+            let d_rhs_k = sc.m_inv.clone().swap_dims(2, 3).matmul(d_w_wy);
+            let d_rhs_v = sc.m_inv.clone().swap_dims(2, 3).matmul(d_v_new);
+            let d_akk = (-d_rhs_k.clone().matmul(w_wy.clone().swap_dims(2, 3))
+                - d_rhs_v.clone().matmul(u_wy.clone().swap_dims(2, 3)))
+                * strict;
+
+            let d_k_g = d_k_g + d_akk.clone().swap_dims(2, 3).matmul(rhs_k.clone());
+            let d_bk_e = d_akk.matmul(k_g.clone());
+
+            // rhs_k = b·k·E  →  bk = rhs_k / E, d_bk = (d_rhs_k + d_bkE) ⊙ E
+            let bk = rhs_k.clone() / g_exp.clone();
+            let d_bk = (d_rhs_k.clone() + d_bk_e.clone()) * g_exp.clone();
+            let d_b_c = d_bk.clone() * k_c.clone();
+            let d_k_bk = d_bk * b_c.clone();
+            let d_e_rhsk = d_rhs_k * bk.clone();
+
+            // rhs_v = w·v
+            let d_w_c = d_rhs_v.clone() * v_c.clone();
+            let d_v_c = d_rhs_v * w_c;
+
+            // kG = k / E
+            let d_k_kg = d_k_g.clone() / g_exp.clone();
+            let d_e_kg = -(d_k_g * k_c.clone() / g_exp.clone().powf_scalar(2.0));
+
+            // q·E, bk·E = b·k·E (d_E from the qE path uses qE/E instead of q)
+            let d_q_c = d_qe.clone() * g_exp.clone();
+            let d_e_qe = d_qe * q_gated / g_exp.clone();
+            let d_e_bke = d_bk_e * bk;
+
+            // E = exp(G), G = cumsum(g): d_G = d_E·E, d_g = reverse cumsum
+            let mut d_e = d_e_rhsk + d_e_kg + d_e_qe + d_e_bke + d_e_decay;
+            // E_last = E[c-1] receives the accumulated row adjoint
+            let cur_last = d_e.clone().slice([0..batch, 0..heads, c - 1..c]);
+            d_e = d_e.slice_assign(
+                [0..batch, 0..heads, c - 1..c, 0..k_dim],
+                cur_last + d_e_last,
+            );
+            let d_g_c = (d_e * g_exp.clone()).flip([2]).cumsum(2).flip([2]);
+
+            d_q_parts.push(d_q_c);
+            d_k_parts.push(d_k_bk + d_k_kg + d_k_bptt);
+            d_v_parts.push(d_v_c);
+            d_g_parts.push(d_g_c);
+            d_b_parts.push(d_b_c);
+            d_w_parts.push(d_w_c);
+
+            // chunk 0 (the last processed, ci == 0) is the *input* state; its
+            // state-input adjoint is the gradient of `s_in`. The adjoints of
+            // later chunks are intermediate-state gradients that only chain
+            // backwards through `d_state_acc`.
+            d_state_acc = d_s_c;
+            if ci == 0 {
+                d_s = d_state_acc.clone();
+            }
+        }
+
+        // The chunk loop ran in reverse; concatenate back into forward order.
+        let d_q = Tensor::cat(d_q_parts.into_iter().rev().collect(), 2);
+        let d_k = Tensor::cat(d_k_parts.into_iter().rev().collect(), 2);
+        let d_v = Tensor::cat(d_v_parts.into_iter().rev().collect(), 2);
+        let d_g = Tensor::cat(d_g_parts.into_iter().rev().collect(), 2);
+        let d_b = Tensor::cat(d_b_parts.into_iter().rev().collect(), 2);
+        let d_w = Tensor::cat(d_w_parts.into_iter().rev().collect(), 2);
+
+        let d_inputs = [
+            d_q,
+            d_k,
+            d_v,
+            d_g,
+            d_b,
+            d_w,
+            d_s,
+        ];
+        for (i, grad) in d_inputs.into_iter().enumerate() {
+            if let Some(node) = ops.parents[i].clone() {
+                grads.register::<B>(node.id, grad.try_into_primitive::<B>().unwrap());
+            }
+        }
+    }
+}
+
+/// Fused chunked WY forward with exact backward, for autodiff backends.
+///
+/// Takes tensors dispatched on `Autodiff<Inner>` (default checkpoint
+/// strategy). Returns `None` when the dispatch does not match, in which case
+/// the caller falls back to the plain tensor-ops path.
+#[allow(clippy::too_many_arguments)]
+pub fn chunk_wy_forward_autodiff<Inner: Backend>(
+    q: Tensor<4>,
+    k: Tensor<4>,
+    v: Tensor<4>,
+    g: Tensor<4>,
+    b: Tensor<4>,
+    w: Tensor<4>,
+    state: Tensor<4>,
+    scale: f64,
+    chunk_size: usize,
+) -> Option<(Tensor<4>, Tensor<4>)>
+where
+    DispatchTensor: DispatchKindConversion<Autodiff<Inner>> + DispatchKindConversion<Inner>,
+{
+    let inner = |t: Tensor<4>| t.try_into_primitive::<Autodiff<Inner>>().ok();
+    let [q, k, v, g, b, w, state] = [q, k, v, g, b, w, state].map(inner);
+    let (q, k, v, g, b, w, state) = match (q, k, v, g, b, w, state) {
+        (Some(q), Some(k), Some(v), Some(g), Some(b), Some(w), Some(state)) => {
+            (q, k, v, g, b, w, state)
+        }
+        _ => return None,
+    };
+
+    let (q_t, k_t, v_t, g_t, b_t, w_t, s_t) = (
+        Tensor::from_primitive::<Inner>(q.primitive.clone()),
+        Tensor::from_primitive::<Inner>(k.primitive.clone()),
+        Tensor::from_primitive::<Inner>(v.primitive.clone()),
+        Tensor::from_primitive::<Inner>(g.primitive.clone()),
+        Tensor::from_primitive::<Inner>(b.primitive.clone()),
+        Tensor::from_primitive::<Inner>(w.primitive.clone()),
+        Tensor::from_primitive::<Inner>(state.primitive.clone()),
+    );
+
+    // Forward on the inner backend. On the bare CUDA backend the two fused
+    // chunk kernels run instead of the tensor path (2 launches per chunk
+    // instead of ~150; verified in tests/fused_chunk_verify.rs). The tensor
+    // path returns its scratch so the backward can skip the recompute; the
+    // fused path does not expose intermediates, so its backward recomputes.
+    let (out_t, new_state_t, scratch) = {
+        #[cfg(feature = "cuda")]
+        {
+            use crate::kernel::chunk_cube::cuda::{fused_chunk_forward_scratch, is_cuda};
+            if is_cuda::<Inner>() {
+                if let Some((o, ns, io)) = fused_chunk_forward_scratch::<Inner>(
+                    q_t.clone(),
+                    k_t.clone(),
+                    v_t.clone(),
+                    g_t.clone(),
+                    b_t.clone(),
+                    w_t.clone(),
+                    s_t.clone(),
+                    scale,
+                    chunk_size,
+                ) {
+                    // Rebuild the minimal scratch from the exported kernel
+                    // buffers, so the backward never re-runs the forward.
+                    // The kernel stores aqk transposed ([s][r] = score(q_r,k_s))
+                    // and qgt as [k][c]; E is recovered from kgd = k·glast/E.
+                    let [batch, heads, time, k_dim] = q_t.shape().dims::<4>();
+                    let (nt, c) = (time / chunk_size, chunk_size);
+                    let aqk_t = io
+                        .aqk
+                        .reshape([batch, heads, nt, c, c])
+                        .swap_dims(3, 4)
+                        .mul_scalar(1.0);
+                    let qg_t = io
+                        .qgt
+                        .reshape([batch, heads, nt, k_dim, c])
+                        .swap_dims(3, 4)
+                        .mul_scalar(1.0);
+                    let kgd = io.kgd.reshape([batch, heads, nt, c, k_dim]);
+                    let glast = io
+                        .glast
+                        .reshape([batch, heads, nt, k_dim])
+                        .unsqueeze_dim::<5>(3);
+                    let k_r = k_t.clone().reshape([batch, heads, nt, c, k_dim]);
+                    let e_full = (k_r * glast / kgd).mul_scalar(1.0);
+                    let m_inv = io.m_inv.reshape([batch, heads, nt, c, c]);
+                    let chunks = (0..nt)
+                        .map(|ci| crate::forward::ChunkScratch {
+                            g_exp: e_full
+                                .clone()
+                                .slice([0..batch, 0..heads, ci..ci + 1])
+                                .reshape([batch, heads, c, k_dim]),
+                            q_gated: qg_t
+                                .clone()
+                                .slice([0..batch, 0..heads, ci..ci + 1])
+                                .reshape([batch, heads, c, k_dim]),
+                            aqk: aqk_t
+                                .clone()
+                                .slice([0..batch, 0..heads, ci..ci + 1])
+                                .reshape([batch, heads, c, c]),
+                            m_inv: m_inv
+                                .clone()
+                                .slice([0..batch, 0..heads, ci..ci + 1])
+                                .reshape([batch, heads, c, c]),
+                        })
+                        .collect();
+                    (o, ns, Some(crate::forward::ChunkWyScratch { chunks }))
+                } else {
+                    let (o, ns, sc) = chunk_wy_forward_impl(
+                        q_t, k_t, v_t, g_t, b_t, w_t, s_t, scale, chunk_size, None,
+                    );
+                    (o, ns, Some(sc))
+                }
+            } else {
+                let (o, ns, sc) = chunk_wy_forward_impl(
+                    q_t, k_t, v_t, g_t, b_t, w_t, s_t, scale, chunk_size, None,
+                );
+                (o, ns, Some(sc))
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            let (o, ns, sc) = chunk_wy_forward_impl(
+                q_t, k_t, v_t, g_t, b_t, w_t, s_t, scale, chunk_size, None,
+            );
+            (o, ns, Some(sc))
+        }
+    };
+    let out_prim = out_t.try_into_primitive::<Inner>().unwrap();
+    let new_state_prim = new_state_t.try_into_primitive::<Inner>().unwrap();
+
+    let nodes = [
+        q.node.clone(),
+        k.node.clone(),
+        v.node.clone(),
+        g.node.clone(),
+        b.node.clone(),
+        w.node.clone(),
+        state.node.clone(),
+    ];
+    let prep = ChunkWy.prepare::<NoCheckpointing>(nodes);
+
+    let (out_adt, new_state_adt) = match prep.compute_bound().stateful() {
+        OpsKind::Tracked(mut prep) => {
+            let ids = [
+                None, // q: not checkpointed (the scratch carries qE/E)
+                Some(prep.checkpoint(&k)),
+                Some(prep.checkpoint(&v)),
+                None, // g: not checkpointed (only E is needed)
+                Some(prep.checkpoint(&b)),
+                Some(prep.checkpoint(&w)),
+                Some(prep.checkpoint(&state)),
+            ];
+            let out = prep.finish(
+                (ids, scale, chunk_size, scratch.expect("chunk forward always produces a scratch")),
+                out_prim,
+            );
+            (out, <Autodiff<Inner> as AutodiffBackend>::from_inner(new_state_prim))
+        }
+        OpsKind::UnTracked(prep) => {
+            let out = prep.finish(out_prim);
+            (out, <Autodiff<Inner> as AutodiffBackend>::from_inner(new_state_prim))
+        }
+    };
+
+    Some((
+        Tensor::from_primitive::<Autodiff<Inner>>(out_adt),
+        Tensor::from_primitive::<Autodiff<Inner>>(new_state_adt),
+    ))
+}
+
+/// [`chunk_wy_forward_autodiff`] with a plain-tensor fallback, coercible to a
+/// chunk function pointer for the module training path.
+#[allow(clippy::too_many_arguments)]
+pub fn chunk_autodiff_or_plain<Inner: Backend>(
+    q: Tensor<4>,
+    k: Tensor<4>,
+    v: Tensor<4>,
+    g: Tensor<4>,
+    b: Tensor<4>,
+    w: Tensor<4>,
+    state: Tensor<4>,
+    scale: f64,
+    chunk_size: usize,
+) -> (Tensor<4>, Tensor<4>)
+where
+    DispatchTensor: DispatchKindConversion<Autodiff<Inner>> + DispatchKindConversion<Inner>,
+{
+    chunk_wy_forward_autodiff::<Inner>(q.clone(), k.clone(), v.clone(), g.clone(), b.clone(), w.clone(), state.clone(), scale, chunk_size)
+        .unwrap_or_else(|| chunk_wy_forward(q, k, v, g, b, w, state, scale, chunk_size))
+}

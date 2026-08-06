@@ -1,3 +1,4 @@
+#![cfg(feature = "cuda")]
 #![allow(
     missing_docs,
     non_snake_case,

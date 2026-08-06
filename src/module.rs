@@ -1,4 +1,7 @@
-use burn::backend::{Backend, DispatchKindConversion};
+use burn::backend::Backend;
+#[cfg(feature = "autodiff")]
+use burn::backend::AutodiffBackend;
+use burn::backend::DispatchKindConversion;
 use burn::module::{Initializer, Module, Param};
 use burn::nn::{Linear, LinearConfig};
 use burn::tensor::{Device, DispatchTensor, Distribution as TensorDistribution, Tensor};
@@ -10,6 +13,59 @@ use crate::forward::chunk_wy_forward;
 use crate::kernel::fused_recurrent::fused_recurrent_gdn2;
 use crate::l2norm::l2_normalize_4d;
 use crate::short_conv::{short_conv_1d, SHORT_CONV_CACHE};
+
+/// Chunked WY forward that dispatches to the two fused CUDA chunk kernels on
+/// `CudaBare` (2 launches per chunk) and falls back to the tensor path
+/// everywhere else.
+///
+/// Chunked WY forward variant selectable at runtime (plain tensor path, the
+/// fused CUDA kernels or the fused autodiff op), so the training core stays
+/// backend-agnostic.
+type ChunkFn = fn(
+    Tensor<4>,
+    Tensor<4>,
+    Tensor<4>,
+    Tensor<4>,
+    Tensor<4>,
+    Tensor<4>,
+    Tensor<4>,
+    f64,
+    usize,
+) -> (Tensor<4>, Tensor<4>);
+
+#[allow(clippy::too_many_arguments)]
+fn chunk_wy_dispatch<B: Backend>(
+    q: Tensor<4>,
+    k: Tensor<4>,
+    v: Tensor<4>,
+    g: Tensor<4>,
+    b: Tensor<4>,
+    w: Tensor<4>,
+    state: Tensor<4>,
+    scale: f64,
+    chunk_size: usize,
+) -> (Tensor<4>, Tensor<4>)
+where
+    DispatchTensor: DispatchKindConversion<B>,
+{
+    #[cfg(feature = "cuda")]
+    if crate::kernel::chunk_cube::cuda::is_cuda::<B>() {
+        if let Some(r) = crate::kernel::chunk_cube::cuda::fused_chunk_forward::<B>(
+            q.clone(),
+            k.clone(),
+            v.clone(),
+            g.clone(),
+            b.clone(),
+            w.clone(),
+            state.clone(),
+            scale,
+            chunk_size,
+        ) {
+            return r;
+        }
+    }
+    chunk_wy_forward(q, k, v, g, b, w, state, scale, chunk_size)
+}
 
 /// Gain used for Xavier-uniform init of all linear layers, matching the
 /// reference implementation (`gain = 2^-2.5`).
@@ -273,7 +329,7 @@ impl GatedDeltaNet2 {
                         .as_ref()
                         .map(|s| s.recurrent.clone())
                         .unwrap_or_else(|| Tensor::zeros([batch, hv, hk, v_head], &device));
-                    chunk_wy_forward(
+                    chunk_wy_dispatch::<B>(
                         projected.q,
                         projected.k,
                         projected.v,
@@ -329,6 +385,34 @@ impl GatedDeltaNet2 {
     where
         DispatchTensor: DispatchKindConversion<B>,
     {
+        self.forward_train_core::<B>(hidden_states, chunk_wy_dispatch::<B>)
+    }
+
+    /// Training forward with the fused autodiff chunk op.
+    ///
+    /// Same result as [`forward_train`](Self::forward_train) (verified by
+    /// `tests/autodiff_chunk.rs`)
+    /// but the whole chunked WY forward runs as a single autodiff node with an
+    /// exact matrix-level backward — the per-op autodiff graph and its
+    /// gradient bookkeeping are skipped.
+    #[cfg(feature = "autodiff")]
+    pub fn forward_train_fused<B: AutodiffBackend>(&self, hidden_states: Tensor<3>) -> Tensor<3>
+    where
+        DispatchTensor: DispatchKindConversion<B>
+            + DispatchKindConversion<B::InnerBackend>
+            + DispatchKindConversion<burn_autodiff::Autodiff<B::InnerBackend>>,
+    {
+        self.forward_train_core::<B>(hidden_states, crate::autodiff::chunk_autodiff_or_plain::<B::InnerBackend>)
+    }
+
+    fn forward_train_core<B: Backend>(
+        &self,
+        hidden_states: Tensor<3>,
+        chunk: ChunkFn,
+    ) -> Tensor<3>
+    where
+        DispatchTensor: DispatchKindConversion<B>,
+    {
         self.validate(&hidden_states);
         let [batch, tokens, _] = hidden_states.shape().dims::<3>();
         let (projected, _conv_out) = self.project(hidden_states, None);
@@ -356,7 +440,7 @@ impl GatedDeltaNet2 {
                 o
             }
             Gdn2Mode::Chunk => {
-                let (o, _s) = chunk_wy_forward(
+                let (o, _s) = chunk(
                     projected.q,
                     projected.k,
                     projected.v,

@@ -7,7 +7,7 @@ use burn::module::Param;
 use burn::nn::{Linear, LinearConfig};
 use burn::tensor::Device;
 use burn::tensor::{Tensor, TensorData};
-use burn_gdn2::{GatedDeltaNet2, Gdn2Config, Gdn2Mode};
+use burn_gdn2::{GatedDeltaNet2, Gdn2Config, Gdn2Mode, Gdn2State};
 
 const EPSILON: f32 = 5e-4;
 
@@ -159,7 +159,7 @@ fn test_gdn2_1000_cases() {
         let ref_out = t3(&out_data, &out_shape, &device);
 
         let mut state: Option<Gdn2State> = None;
-        let output = module.forward(input, &mut state, true);
+        let output = module.forward::<NdArray>(input, &mut state, true);
 
         let out_bytes: Vec<f32> = output
             .into_data()

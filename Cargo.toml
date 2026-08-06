@@ -1,19 +1,20 @@
 [package]
 name = "burn-gdn2"
-version = "0.5.0"
+version = "0.7.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.95"
 license = "AGPL-3.0"
 description = "Gated DeltaNet 2 - linear recurrent token mixer with channel-wise erase/write gates"
 repository = "https://github.com/sehaxe/burn-gdn2"
 homepage = "https://github.com/sehaxe/burn-gdn2"
 keywords = ["burn", "gdn2", "linear-attention", "recurrent", "transformer"]
 readme = "README.md"
+exclude = ["__pycache__/", "TODO.md", "Cargo.lock", "target/"]
 
 [features]
 default = ["std"]
 std = ["burn/std", "burn-tensor/std"]
-autodiff = ["burn/autodiff"]
+autodiff = ["burn/autodiff", "burn-tensor/std", "dep:burn-autodiff"]
 cuda = ["dep:burn-cuda", "dep:burn-cubecl", "dep:cubecl", "burn/cuda", "burn-tensor/cuda"]
 binary-tests = []
 
@@ -21,6 +22,7 @@ binary-tests = []
 burn = { version = "0.22.0-pre.1", default-features = false, features = ["extension"] }
 burn-nn = { version = "0.22.0-pre.1", default-features = false }
 burn-tensor = { version = "0.22.0-pre.1", default-features = false }
+burn-autodiff = { version = "0.22.0-pre.1", default-features = false, features = ["std"], optional = true }
 burn-cuda = { version = "0.22.0-pre.1", optional = true, default-features = false }
 burn-cubecl = { version = "0.22.0-pre.1", optional = true, default-features = false }
 cubecl = { version = "0.11.0-pre.1", optional = true, default-features = false, features = ["std"] }

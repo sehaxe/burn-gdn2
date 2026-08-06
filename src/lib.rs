@@ -54,12 +54,18 @@ pub mod l2norm;
 pub mod module;
 pub mod short_conv;
 
+#[cfg(feature = "autodiff")]
+pub mod autodiff;
+
 pub use config::{Gdn2Config, Gdn2Mode};
 pub use forward::chunk_wy_forward;
 pub use kernel::fused_recurrent::fused_recurrent_forward;
 pub use l2norm::{l2_normalize, l2_normalize_4d};
 pub use module::{rms_norm_gate_per_head, GatedDeltaNet2, Gdn2State, ProjectedInputs};
 pub use short_conv::{short_conv_1d, SHORT_CONV_CACHE, SHORT_CONV_KERNEL};
+
+#[cfg(feature = "autodiff")]
+pub use autodiff::{chunk_autodiff_or_plain, chunk_wy_forward_autodiff};
 
 #[cfg(feature = "cuda")]
 pub use kernel::fused_recurrent_cube::cuda::CudaBare;
