@@ -1,4 +1,4 @@
-name: CI
+name: CI # gdn2
 
 on:
   push:
