@@ -46,7 +46,7 @@ where
         [Option<NodeId>; N_PARENTS],
         f64,
         usize,
-        crate::forward::ChunkWyScratch,
+        Option<crate::forward::ChunkWyScratch>,
         crate::autodiff::FusedState,
     );
 
@@ -102,6 +102,7 @@ where
         let [batch, heads, time, k_dim] = k.shape().dims::<4>();
         let v_dim = v.shape().dims::<4>()[3];
         let device = k.device();
+        let scratch = scratch.expect("tensor-path backward needs the chunk scratch");
         let n_chunks = scratch.chunks.len();
 
         // --- forward pass over the chunks: derive the values the minimal
@@ -415,48 +416,10 @@ where
                         w: io.w.clone(),
                         u: io.u.clone(),
                     };
-                    let aqk_t = io
-                        .aqk
-                        .reshape([batch, heads, nt, c, c])
-                        .swap_dims(3, 4)
-                        .mul_scalar(1.0);
-                    let qg_t = io
-                        .qgt
-                        .reshape([batch, heads, nt, k_dim, c])
-                        .swap_dims(3, 4)
-                        .mul_scalar(1.0);
-                    let kgd = io.kgd.reshape([batch, heads, nt, c, k_dim]);
-                    let glast = io
-                        .glast
-                        .reshape([batch, heads, nt, k_dim])
-                        .unsqueeze_dim::<5>(3);
-                    let k_r = k_t.clone().reshape([batch, heads, nt, c, k_dim]);
-                    let e_full = (k_r * glast / kgd).mul_scalar(1.0);
-                    let m_inv = io.m_inv.reshape([batch, heads, nt, c, c]);
-                    let chunks = (0..nt)
-                        .map(|ci| crate::forward::ChunkScratch {
-                            g_exp: e_full
-                                .clone()
-                                .slice([0..batch, 0..heads, ci..ci + 1])
-                                .reshape([batch, heads, c, k_dim]),
-                            q_gated: qg_t
-                                .clone()
-                                .slice([0..batch, 0..heads, ci..ci + 1])
-                                .reshape([batch, heads, c, k_dim]),
-                            aqk: aqk_t
-                                .clone()
-                                .slice([0..batch, 0..heads, ci..ci + 1])
-                                .reshape([batch, heads, c, c]),
-                            m_inv: m_inv
-                                .clone()
-                                .slice([0..batch, 0..heads, ci..ci + 1])
-                                .reshape([batch, heads, c, c]),
-                        })
-                        .collect();
                     (
                         o,
                         ns,
-                        Some(crate::forward::ChunkWyScratch { chunks }),
+                        None, // fused backward uses the exported buffers, not the scratch
                         Some(fused_inputs),
                     )
                 } else {
@@ -504,16 +467,7 @@ where
                 Some(prep.checkpoint(&w)),
                 Some(prep.checkpoint(&state)),
             ];
-            let out = prep.finish(
-                (
-                    ids,
-                    scale,
-                    chunk_size,
-                    scratch.expect("chunk forward always produces a scratch"),
-                    fused_data,
-                ),
-                out_prim,
-            );
+            let out = prep.finish((ids, scale, chunk_size, scratch, fused_data), out_prim);
             (
                 out,
                 <Autodiff<Inner> as AutodiffBackend>::from_inner(new_state_prim),
