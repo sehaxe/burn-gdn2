@@ -381,6 +381,7 @@ where
     // instead of ~150; verified in tests/fused_chunk_verify.rs). The tensor
     // path returns its scratch so the backward can skip the recompute; the
     // fused path does not expose intermediates, so its backward recomputes.
+    #[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
     let (out_t, new_state_t, scratch, fused_data) = {
         #[cfg(feature = "cuda")]
         {
