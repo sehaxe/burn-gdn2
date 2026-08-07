@@ -777,7 +777,7 @@ pub mod cuda {
     /// is not the bare CUDA `CubeBackend`, the sequence length is not a
     /// multiple of the chunk size, or the dimensions exceed the kernel limits;
     /// the caller then falls back to the tensor-ops path.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn fused_chunk_forward<B: Backend>(
         q: Tensor<B, 4>,
         k: Tensor<B, 4>,
