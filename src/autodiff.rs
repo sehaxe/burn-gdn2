@@ -403,8 +403,6 @@ where
                     // transposed ([s][r] = score(q_r,k_s)) and qgt as [k][c];
                     // E is recovered from kgd = k·glast/E.
                     use crate::kernel::chunk_adjoint_cube::cuda::FusedBackwardInputs;
-                    let [batch, heads, time, k_dim] = q_t.shape().dims::<4>();
-                    let (nt, c) = (time / chunk_size, chunk_size);
                     let fused_inputs = FusedBackwardInputs {
                         m_inv: io.m_inv.clone(),
                         aqk: io.aqk.clone(),
