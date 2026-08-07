@@ -56,6 +56,7 @@ where
         grads: &mut Gradients,
         checkpointer: &mut Checkpointer,
     ) {
+        #[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
         let (ids, scale, chunk_size, scratch, fused_data) = ops.state;
         // q and g are not checkpointed: the scratch (always saved) carries
         // everything their values would contribute (qE, E), so the adjoint
