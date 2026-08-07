@@ -437,7 +437,7 @@ where
         {
             let (o, ns, sc) =
                 chunk_wy_forward_impl(q_t, k_t, v_t, g_t, b_t, w_t, s_t, scale, chunk_size, None);
-            (o, ns, Some(sc), None)
+            (o, ns, Some(sc), ())
         }
     };
     let out_prim = out_t.try_into_primitive::<Inner>().unwrap();
